@@ -4,6 +4,7 @@ import {
   AlertTriangle, RefreshCw, X, ChevronRight, Download, Terminal,
   Lock, Eye, GitPullRequest, Settings, Radio
 } from 'lucide-react';
+import { api, type AuditLogDto, type CertificateDto, type FindingDto } from './lib/api';
 
 interface Metric {
   tokens: number;
@@ -21,16 +22,8 @@ interface Thought {
   timestamp: number;
 }
 
-interface Finding {
-  finding_id: string;
-  title: string;
-  state: 'hypothesis' | 'validated' | 'refuted' | 'fixed';
-  severity: string;
-  reachable: boolean;
-  clause?: string;
-  pov_code?: string;
-  pov_hash?: string;
-}
+/** Shapes come from the backend contract — see src/lib/api.ts. */
+type Finding = FindingDto;
 
 interface DiffPatch {
   finding_id: string;
@@ -47,15 +40,7 @@ interface GauntletStatus {
   detail?: string;
 }
 
-interface AuditLog {
-  log_id: number;
-  timestamp: number;
-  actor: string;
-  action: string;
-  subject: string;
-  evidence_hash: string;
-  prev_hash: string;
-}
+type AuditLog = AuditLogDto;
 
 const PIPELINE_STEPS = [
   { key: 'ingest', label: 'Ingest Repository', desc: 'Secure target environment isolation setup' },
@@ -98,9 +83,10 @@ function App() {
   const [showAuditModal, setShowAuditModal] = useState<boolean>(false);
   const [showPRModal, setShowPRModal] = useState<boolean>(false);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
-  const [certificateData, setCertificateData] = useState<any>(null);
+  const [certificateData, setCertificateData] = useState<CertificateDto | null>(null);
   const [prUrl, setPrUrl] = useState<string | null>(null);
   const [prLoading, setPrLoading] = useState<boolean>(false);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
   const eventSourceRef = useRef<EventSource | null>(null);
   const thoughtsEndRef = useRef<HTMLDivElement | null>(null);
@@ -111,16 +97,18 @@ function App() {
     }
   }, [thoughts]);
 
+  // Close the SSE stream when the component unmounts
+  useEffect(() => {
+    return () => eventSourceRef.current?.close();
+  }, []);
+
   // Load audit logs if requested
   const fetchAuditLogs = async () => {
     try {
-      const res = await fetch(`http://127.0.0.1:8000/api/audit?role=${role}`);
-      if (res.ok) {
-        const data = await res.json();
-        setAuditLogs(data);
-      }
+      setAuditLogs(await api.getAudit(role));
     } catch (err) {
       console.error("Failed to load audit logs", err);
+      setAuditLogs([]);
     }
   };
 
@@ -137,14 +125,10 @@ function App() {
     }
   }, [role, runId]);
 
-  const fetchFindings = async () => {
-    if (!runId) return;
+  const fetchFindings = async (id: string = runId ?? '') => {
+    if (!id) return;
     try {
-      const res = await fetch(`http://127.0.0.1:8000/api/runs/${runId}/findings?role=${role}`);
-      if (res.ok) {
-        const data = await res.json();
-        setFindings(data);
-      }
+      setFindings(await api.listFindings(id, role));
     } catch (err) {
       console.error(err);
     }
@@ -163,23 +147,19 @@ function App() {
     setGauntlet({ mutation: 'none', sibling: 'none', replay: 'none', contract: 'none' });
     setCertificateData(null);
     setPrUrl(null);
+    setStatusMessage(null);
 
     try {
-      const res = await fetch('http://127.0.0.1:8000/api/runs', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ repo_url: repoUrl, role: role })
-      });
-
-      if (!res.ok) throw new Error("Failed to start run");
-      const data = await res.json();
+      const data = await api.startRun(repoUrl, role);
       setRunId(data.run_id);
-      
+
       // Connect to SSE stream
       connectStream(data.run_id);
     } catch (err) {
       console.error(err);
       setRunStatus('error');
+      setCurrentPhase('idle');
+      setStatusMessage(err instanceof Error ? err.message : 'Failed to start run');
     }
   };
 
@@ -188,7 +168,7 @@ function App() {
       eventSourceRef.current.close();
     }
 
-    const source = new EventSource(`http://127.0.0.1:8000/api/runs/${id}/stream`);
+    const source = new EventSource(api.streamUrl(id, role));
     eventSourceRef.current = source;
 
     source.onmessage = (event) => {
@@ -197,9 +177,9 @@ function App() {
       if (data.t === 'phase') {
         setCurrentPhase(data.phase);
         if (data.phase === 'complete') {
-          setRunStatus('completed');
+          setRunStatus(data.status === 'failed' ? 'error' : 'completed');
           source.close();
-          fetchFindings();
+          fetchFindings(id);
           loadCertificate(id);
         } else {
           setRunStatus('running');
@@ -224,14 +204,17 @@ function App() {
         setFindings((prev) => {
           const exists = prev.some((f) => f.finding_id === data.id);
           if (exists) {
-            return prev.map((f) => f.finding_id === data.id ? { ...f, state: data.state } : f);
+            return prev.map((f) => f.finding_id === data.id
+              ? { ...f, state: data.state, title: data.title || f.title }
+              : f);
           }
           return [...prev, {
             finding_id: data.id,
-            title: 'Analyzing potential vulnerability...',
+            title: data.title || 'Analyzing potential vulnerability...',
             state: data.state,
             severity: data.severity,
-            reachable: data.reachable
+            reachable: data.reachable,
+            clause: data.clause
           }];
         });
         setSelectedFindingId(data.id);
@@ -250,22 +233,22 @@ function App() {
         }));
       } else if (data.t === 'artifact' && data.kind === 'certificate') {
         loadCertificate(id);
+      } else if (data.t === 'error') {
+        setStatusMessage(`${data.phase || 'pipeline'}: ${data.message}`);
       }
     };
 
     source.onerror = () => {
-      source.close();
-      setRunStatus('completed');
+      // Fires on transient reconnects too — only a CLOSED socket is fatal.
+      if (source.readyState !== EventSource.CLOSED) return;
+      setRunStatus((prev) => (prev === 'running' ? 'error' : prev));
+      setStatusMessage((prev) => prev ?? 'Event stream disconnected. Is the backend running?');
     };
   };
 
   const loadCertificate = async (id: string) => {
     try {
-      const res = await fetch(`http://127.0.0.1:8000/api/runs/${id}/certificate`);
-      if (res.ok) {
-        const data = await res.json();
-        setCertificateData(data);
-      }
+      setCertificateData(await api.getCertificate(id, role));
     } catch (err) {
       console.error(err);
     }
@@ -275,26 +258,13 @@ function App() {
     if (!runId || !selectedFindingId) return;
     setPrLoading(true);
     try {
-      const res = await fetch('http://127.0.0.1:8000/api/publish', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          run_id: runId,
-          finding_id: selectedFindingId,
-          role: role
-        })
-      });
-
-      if (!res.ok) {
-        const errData = await res.json();
-        throw new Error(errData.detail || "Publish rejected by policy gate");
-      }
-      
-      const data = await res.json();
+      const data = await api.publish(runId, selectedFindingId, role);
       setPrUrl(data.pr_url);
       setShowPRModal(true);
-    } catch (err: any) {
-      alert(`Publish Gate Rejected: ${err.message}`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Publish rejected by policy gate';
+      setStatusMessage(`Publish gate rejected: ${message}`);
+      alert(`Publish Gate Rejected: ${message}`);
     } finally {
       setPrLoading(false);
     }
@@ -373,6 +343,29 @@ function App() {
           </button>
         </div>
       </header>
+
+      {/* BACKEND STATUS / POLICY MESSAGES */}
+      {statusMessage && (
+        <div
+          id="status-banner"
+          style={{
+            display: 'flex', alignItems: 'center', gap: '8px', margin: '0 16px 12px',
+            padding: '10px 12px', fontSize: '12px', borderRadius: '6px',
+            background: 'rgba(255, 69, 58, 0.1)', border: '1px solid var(--color-error)',
+            color: 'var(--color-error)'
+          }}
+        >
+          <AlertTriangle size={14} />
+          <span style={{ flex: 1 }}>{statusMessage}</span>
+          <button
+            className="btn btn-secondary"
+            style={{ padding: '2px 8px', fontSize: '11px' }}
+            onClick={() => setStatusMessage(null)}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
 
       {/* DASHBOARD COCKPIT GRID */}
       <main className="dashboard-grid">
@@ -466,18 +459,31 @@ function App() {
                 <div className="finding-detail-card" id="finding-details">
                   <div className="finding-detail-title">Vulnerability Detail: {activeFinding.finding_id}</div>
                   <div className="clause-box">
-                    <strong>Violated SAMHITA Clause:</strong> CL-01 (Observed predicate boundary check bypassed)
+                    <strong>Violated SAMHITA Clause:</strong>{' '}
+                    {activeFinding.clause ?? 'pending'} (Observed predicate boundary check bypassed)
+                    {activeFinding.remediation_path && (
+                      <div className="font-mono" style={{ fontSize: '11px', marginTop: '4px' }}>
+                        {activeFinding.remediation_path}
+                      </div>
+                    )}
                   </div>
                   <div>
                     <div style={{ fontSize: '11px', textTransform: 'uppercase', color: 'var(--text-secondary)', marginBottom: '4px' }}>
                       Exploit Payload (Gated View)
                     </div>
                     <div style={{ background: '#020408', border: '1px solid var(--border-color)', borderRadius: '6px', padding: '10px', fontSize: '11px', fontFamily: 'var(--font-mono)' }}>
-                      {role === 'Owner' || role === 'Sec Reviewer' ? (
-                        <code>{activeFinding.pov_code || "POST /api/v1/parse Content-Length: -1"}</code>
+                      {/* The server redacts pov_code for roles without finding:read_pov —
+                          the client never holds an exploit it isn't cleared to see. */}
+                      {activeFinding.pov_code ? (
+                        <code style={{ whiteSpace: 'pre-wrap' }}>{activeFinding.pov_code}</code>
                       ) : (
                         <div style={{ color: 'var(--color-error)', display: 'flex', alignItems: 'center', gap: '6px' }}>
                           <Lock size={12} /> Redacted (Requires finding:read_pov permissions)
+                          {activeFinding.pov_hash && (
+                            <span className="font-mono" style={{ color: 'var(--text-muted)' }}>
+                              sha256:{activeFinding.pov_hash.slice(0, 16)}…
+                            </span>
+                          )}
                         </div>
                       )}
                     </div>
@@ -701,7 +707,7 @@ function App() {
 
                 <div style={{ marginTop: '20px', display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
                   <a
-                    href={`http://127.0.0.1:8000/api/runs/${runId}/deliverables/changes.md`}
+                    href={runId ? api.deliverableUrl(runId, 'changes.md', role) : '#'}
                     download
                     className="btn btn-secondary"
                     style={{ fontSize: '11px', padding: '6px 12px' }}
@@ -709,7 +715,7 @@ function App() {
                     <Download size={12} /> CHANGES.md
                   </a>
                   <a
-                    href={`http://127.0.0.1:8000/api/runs/${runId}/deliverables/remaining.md`}
+                    href={runId ? api.deliverableUrl(runId, 'remaining.md', role) : '#'}
                     download
                     className="btn btn-secondary"
                     style={{ fontSize: '11px', padding: '6px 12px' }}

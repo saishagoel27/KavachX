@@ -85,7 +85,9 @@ async def publish_patches(
                     patch_id=patch_id,
                     success=True,
                     published_patch=pub_patch,
-                    pr_details=pub_patch.get("pull_request_urls", []),
+                    # pub_patch is a PublishedPatch model, and pr_details is
+                    # list[dict] — wrap each URL rather than calling .get().
+                    pr_details=[{"url": url} for url in pub_patch.pull_request_urls],
                     error_message=None,
                     published_at=datetime.utcnow(),
                 )

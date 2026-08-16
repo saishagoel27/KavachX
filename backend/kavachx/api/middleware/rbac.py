@@ -27,6 +27,18 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
 }
 
 
+def normalize_role(role: str | None) -> str:
+    """
+    Map a display role to a matrix key: "Sec Reviewer" → "sec_reviewer".
+
+    Unknown or missing roles fall back to `viewer` (least privilege).
+    """
+    if not role:
+        return "viewer"
+    key = role.strip().lower().replace("-", "_").replace(" ", "_")
+    return key if key in ROLE_PERMISSIONS else "viewer"
+
+
 def has_permission(role: str, permission: str) -> bool:
     return permission in ROLE_PERMISSIONS.get(role, set())
 

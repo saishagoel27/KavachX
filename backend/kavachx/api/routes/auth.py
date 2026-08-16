@@ -86,6 +86,11 @@ def _verify_session(token: str) -> dict:
         raise HTTPException(status_code=401, detail={"error": "invalid_token"})
 
 
+def verify_session_token(token: str) -> dict:
+    """Public entry point for API dependencies outside this module."""
+    return _verify_session(token)
+
+
 # ── Session dependency ─────────────────────────────────────────────────────────
 
 async def current_session(request: Request) -> dict:

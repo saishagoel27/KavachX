@@ -2,3 +2,13 @@
 __pycache__/
 venv/
 .venv
+
+# Secrets — .env.example is the tracked template
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+
+# Local artifacts
+artifacts/

@@ -107,8 +107,55 @@ Ship two models, not three.
 
 ## Getting started
 
-> Full setup instructions will be added once the core scaffold is in place.
-> Start with `docs/IMPLEMENTATION_ORDER.md` to understand what to build first.
+Two processes: a FastAPI backend on `:8000` and a Vite/React dashboard on `:5173`.
+
+### 1. Backend
+
+```bash
+cd backend
+cp .env.example .env          # already present; fill in the <...> values when you have them
+uv sync                       # or: .venv/Scripts/python -m pip install -e .
+uv run uvicorn app:app --reload --port 8000
+```
+
+Check it: `curl http://127.0.0.1:8000/health` · docs at http://127.0.0.1:8000/docs
+
+### 2. Frontend
+
+```bash
+cd frontend
+cp .env.example .env          # already present
+npm install
+npm run dev
+```
+
+Open http://localhost:5173 and press **Start Quest**.
+
+### How the two connect
+
+| Concern | Where it lives |
+|---|---|
+| API base URL | `frontend/.env` → `VITE_API_BASE_URL` (consumed only by `src/lib/api.ts`) |
+| Allowed browser origins | `backend/.env` → `CORS_ALLOW_ORIGINS` |
+| Live run trace | `GET /api/runs/{run_id}/stream` (SSE) → `EventSource` in `App.tsx` |
+| Role / permissions | `backend/.env` → `AUTH_REQUIRED`; matrix in `kavachx/api/middleware/rbac.py` |
+
+Both origins must agree: whatever host:port serves the frontend has to appear in
+`CORS_ALLOW_ORIGINS`, or the browser blocks every call.
+
+Alternative, CORS-free setup for local dev: set `VITE_API_BASE_URL=` (empty) in
+`frontend/.env`. The app then calls same-origin `/api/...` paths and the Vite dev
+server proxies them to `VITE_DEV_PROXY_TARGET`.
+
+### Auth
+
+`AUTH_REQUIRED=false` (the default) lets the dashboard pass a `role` parameter so
+the RBAC matrix is demonstrable without a login — **local development only**.
+Set it to `true` once the GitHub App flow (`/auth/github/install` →
+`/auth/github/callback`) hands the frontend a session JWT; store it with
+`setToken()` from `src/lib/api.ts` and every request will carry it.
+
+> Component build order lives in `docs/IMPLEMENTATION_ORDER.md`.
 
 ---
 

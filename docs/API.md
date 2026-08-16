@@ -1,9 +1,45 @@
 # API
 
-KavachX exposes a FastAPI backend. The frontend (Next.js) consumes it.
+KavachX exposes a FastAPI backend. The frontend (React + Vite) consumes it.
 Progress streams over Server-Sent Events — not WebSockets.
 
 Raw model tokens are never streamed. Only structured RunEvents are sent.
+
+---
+
+## Implemented today (`/api`)
+
+The rest of this document is the target surface. What the dashboard talks to
+right now lives in `kavachx/api/routes/runs.py`, mounted under `/api`:
+
+```
+POST /api/runs                              { repo_url, role? }        → { run_id, status, channel }
+GET  /api/runs                              tenant run summaries
+GET  /api/runs/{run_id}                     run summary + gauntlet
+POST /api/runs/{run_id}/abort               cancel a running analysis
+GET  /api/runs/{run_id}/stream              SSE — the RunEvents below
+GET  /api/runs/{run_id}/findings            PoV redacted without finding:read_pov
+GET  /api/runs/{run_id}/findings/{id}/pov   gated exploit payload (audited)
+GET  /api/runs/{run_id}/patches             diffs + gauntlet verdicts
+GET  /api/runs/{run_id}/certificate         PRAMAAN certificate (level A/B/C/R)
+GET  /api/runs/{run_id}/deliverables/{name} changes.md | remaining.md
+POST /api/publish                           { run_id, finding_id, role? } → { pr_url }
+GET  /api/audit                             hash-chained audit log (audit:read)
+GET  /api/audit/verify                      recompute the chain
+GET  /health                                liveness + effective CORS/auth config
+```
+
+Identity resolution (`kavachx/api/deps.py`): `Authorization: Bearer <jwt>` when
+present, otherwise — and only while `AUTH_REQUIRED=false` — a `role` parameter.
+`EventSource` cannot set headers, which is why the stream accepts `?role=`.
+
+CORS is configured from `CORS_ALLOW_ORIGINS` in `backend/.env`. Credentials are
+disabled automatically if that list contains `*`.
+
+Two deviations from the spec below, both driven by the current frontend:
+`MetricEvent.coverage` is a percentage (0-100), not a fraction, and
+`FindingEvent` carries an extra `title` so the findings table is populated
+before the run finishes.
 
 ---
 

@@ -155,7 +155,9 @@ class AuditEvent(Base):
     subject_type = Column(Text, nullable=False)
     subject_id = Column(Text, nullable=False)
     evidence_hash = Column(Text)
-    metadata = Column(JSONB)
+    # `metadata` is reserved by the Declarative API — keep the DB column name,
+    # expose it under a different attribute.
+    event_metadata = Column("metadata", JSONB)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     prev_hash = Column(Text)                      # hash-chained
 

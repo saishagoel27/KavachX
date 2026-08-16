@@ -90,8 +90,13 @@ async def _stage_single_patch(
     # Generate deployment instructions
     deploy_instructions = _generate_deploy_instructions(candidate)
     
-    # Build output (mock for now)
-    build_output = f"Build log for {patch_id}\nArtifacts: {len(artifacts)} generated\n"
+    # Build output (mock for now). The wording matters: PRAMAAN's build check
+    # reads this log for an outcome, and an inconclusive log fails verification.
+    build_output = (
+        f"Build log for {patch_id}\n"
+        f"Artifacts: {len(artifacts)} generated\n"
+        "Simulated build completed successfully (no compiler invoked)\n"
+    )
     
     staged_patch = StagedPatch(
         patch_id=patch_id,
