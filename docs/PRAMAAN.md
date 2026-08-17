@@ -1,287 +1,199 @@
-# PRAMAAN — Proof-Carrying Repair
+# PRAMAAN — the evidence graph and assurance levels
 
-*Pramāṇa: a means of valid knowledge; evidence.*
-
-PRAMAAN is an evidence graph plus a signed certificate.
-Every claim in the certificate carries provenance edges to the artifact
-that established it.
-
-The output is not "fixed". It is a signed certificate at level A, B, C,
-or R in which every claim drills to executable evidence.
+PRAMAAN is an evidence graph, not a score. Every claim a certificate makes resolves to a node; every
+node carries a content hash. A certificate whose claims do not resolve is **refused**, because a
+document that looks substantiated and is not would be worse than no document.
 
 ---
 
-## Why graded assurance, not boolean proof
-
-Fuzzing and replay establish **bounded empirical assurance**, not formal proof.
-A rigorous evaluator will dismantle any team that claims otherwise.
-
-The correct language is:
-> "bounded empirical assurance, graded and evidenced"
-
-Never say "proven" or "formally verified" unless you have a theorem prover
-result in the evidence graph.
-
----
-
-## Certificate levels
-
-| Level | Requirements | Publish gate |
-|---|---|---|
-| A | All 4 gauntlet stages pass · full 5000-request replay · all SAMHITA clauses hold · exploit blocked 10/10 | Passes — auto-publish available |
-| B | 3 of 4 gauntlet stages pass · partial replay (≥ 1000 requests) · ≥ 80% clauses hold | Passes — human approval required |
-| C | Exploit validated · patch builds · limited verification only | Does NOT pass publish gate |
-| R | Patch refuted — shield remains deployed, honest failure recorded | Does NOT pass publish gate |
-
-Level C and R findings are still valuable — they appear in REMAINING.md
-and the shield remains deployed.
-
----
-
-## Evidence graph structure
-
-```python
-@dataclass
-class EvidenceNode:
-    node_id:  str
-    kind:     Literal[
-        "finding",
-        "clause",
-        "code",
-        "graph",
-        "runtime",
-        "exploit",
-        "shield",
-        "patch",
-        "verification"
-    ]
-    ref:      str      # storage key or sha256 hash of the artifact
-    summary:  str      # one-line human-readable description
-
-@dataclass
-class EvidenceEdge:
-    from_id:  str
-    to_id:    str
-    label:    str      # "discovered_by" | "violates" | "root_cause" |
-                       # "affects" | "blocked_by" | "fixed_by" | "verified_by"
-
-@dataclass
-class EvidenceGraph:
-    nodes: dict[str, EvidenceNode]
-    edges: list[EvidenceEdge]
-```
-
----
-
-## Example evidence graph (the hdr.c case from the spec)
+## The graph
 
 ```
-V17 (finding)
-├── discovered_by  → N1 (graph/static, query #4)
-├── violates       → N2 (SAMHITA clause C017 — header length bound)
-├── root_cause     → N3 (code: hdr.c:340)
-├── affects        → N4 (graph: 14 callers via impact analysis)
-├── runtime        → N5 (trace #9231, sanitizer report)
-├── exploit        → N6 (PoV #44, sha256:1f0c…, reproduced 10/10)
-├── blocked_by     → N7 (shield: filter rule #3, deployed t+3m20s)
-├── fixed_by       → N8 (patch diff, sha256:9c4e…, iteration 2)
-└── verified_by    → N9 (gauntlet 4/4 · replay 5000/5000 · clauses 40/40)
+Vulnerability V02
+ ├── discovered_by      → graph/static, runtime
+ ├── violated_clause    → SAMHITA C088
+ ├── code_evidence      → exporter.py:40, exporter.py:24 (root cause), world model
+ ├── runtime_evidence   → observation trace
+ ├── exploit_evidence   → reproduction record  (the exploit itself is withheld)
+ ├── shielded_by        → shield S02
+ ├── repaired_by        → patch v1 → patch v2   (v2 supersedes v1)
+ ├── verified_by        → mutation PASS · sibling PASS · replay PASS · contract PASS
+ ├── scoped_by          → blast radius
+ └── executed_in        → sandbox session
+
+Certificate KX-6908-V02-054F15 ── attests ──▶ Vulnerability V02
 ```
+
+Node types: `vulnerability`, `discovery_channel`, `samhita_clause`, `code_location`, `runtime_trace`,
+`reproduction`, `shield`, `patch`, `gauntlet_result`, `blast_radius`, `world_model`,
+`sandbox_execution`, `certificate`.
+
+Relations: `discovered_by`, `violated_clause`, `code_evidence`, `runtime_evidence`,
+`exploit_evidence`, `shielded_by`, `repaired_by`, `verified_by`, `scoped_by`, `executed_in`,
+`attests`, `supersedes`.
+
+### Content hashes
+
+`content_hash = sha256(canonical_json({ref, type, title, content, meta}))`
+
+Canonical JSON means sorted keys and no insignificant whitespace, so two structurally identical
+payloads always hash the same. The certificate references these hashes, so it cannot drift from the
+evidence it cites without the hashes changing.
+
+### Refusal conditions
+
+`build_certificate` returns an error rather than a weaker certificate when:
+
+1. **The graph has a dangling claim** — an edge pointing at a node that does not exist. Checked by
+   `unsupported_claims()`; `test_graph_detects_dangling_claims` covers it.
+2. **The finding was never reproduced** and the grade is not Level R.
+
+Refusal is logged and the run continues without that certificate. Nothing weaker is emitted.
+
+### Shared nodes
+
+Several nodes are legitimately shared between findings in one run — the discovery channels, the world
+model, the sandbox session. Their refs are stable by design; that is what makes the whole run one
+graph rather than N disjoint trees. The persistence layer reuses them instead of re-inserting.
 
 ---
 
-## Builder
+## Assurance levels
 
-`pramaan/graph.py`
+**These are bounded empirical assurance. They are never formal proof.** Every certificate carries
+`assurance.not_a_formal_proof: true` and a populated `limitations` list, and the console renders the
+limitations next to the badge rather than in a footnote.
 
-```python
-class EvidenceGraphBuilder:
-    def __init__(self, state: KavachState):
-        self.state = state
-        self.graph = EvidenceGraph(nodes={}, edges=[])
+Grading is deterministic — rules over gauntlet results, no model input, no discretion
+(`app/pramaan/assurance.py`).
 
-    def add_finding(self, finding_id: str, channel: str) -> str:
-        ...
+### Level A
 
-    def add_clause_violation(self, clause_id: str) -> str:
-        ...
+Exploit eliminated · all relevant clauses hold · differential replay passes · mutation passes ·
+sibling hunt passes with **nothing unproved** · coverage change bounded (≤ 10 points).
 
-    def add_code_evidence(self, file: str, line: int) -> str:
-        ...
+Means: the validated exploit no longer reproduces, every attempted mutation failed, the benign corpus
+is behaviourally identical, every in-scope clause still holds, and no structurally similar path remains
+unexamined.
 
-    def add_graph_evidence(self, callers: list[str]) -> str:
-        ...
+Does **not** mean: the vulnerability class is absent from the codebase, no other input reaches the
+weakness, or code that did not execute is safe.
 
-    def add_runtime_evidence(self, trace_id: str, sanitizer_report: str) -> str:
-        ...
+### Level B
 
-    def add_exploit_evidence(self, pov_ref: str, reproduced: int, total: int) -> str:
-        ...
+As A, but the sibling hunt shortlisted code paths sharing the weakness pattern that could not be
+proved safe. None was exploitable in the probes that ran; they are named in the certificate as
+residual risk.
 
-    def add_shield(self, shield_id: str) -> str:
-        ...
+The seeded demo lands here, and the reason is worth stating precisely: a candidate probed *without
+effect* is **unproved, not cleared**. The probe drives the same entrypoint operation as the original
+exploit, so it may never have executed the candidate's function at all. "The analogous request did
+nothing here" and "this code is safe" are different claims, and only the second would justify dropping
+it from residual risk.
 
-    def add_patch(self, patch_id: str, diff_hash: str) -> str:
-        ...
+### Level C
 
-    def add_verification(self, gauntlet: dict, replay_count: int, clauses_held: int) -> str:
-        ...
+Exploit eliminated, but at least one verification dimension is incomplete — behaviour changed on a
+benign case, clauses could not be evaluated, or the coverage swing exceeded the bound. The specific
+limitation is named.
 
-    def link(self, from_id: str, to_id: str, label: str) -> None:
-        ...
+### Level R
 
-    def build(self) -> EvidenceGraph:
-        ...
-```
+Patch refuted and withdrawn. The shield remains deployed. Refuting evidence attached.
 
-Every `add_*` method:
-1. Creates an `EvidenceNode` with a deterministic `node_id`
-2. Stores the artifact reference (hash or storage key) — never the artifact itself
-3. Returns the `node_id` for linking
+**Level R can never publish.** The policy gate rejects it and the API returns `ASSURANCE_LEVEL_R` at
+422. A Level R certificate exists to record honestly that a finding is *not repaired* — and if no
+shield is active either, it says the finding is currently unmitigated.
 
----
+### Grading inputs
 
-## Certificate generation
+| Input | Source |
+| --- | --- |
+| `exploit_eliminated` | the gauntlet's mutation stage found no bypass |
+| `mutation_pass`, `sibling_pass`, `replay_pass`, `samhita_pass` | stage verdicts |
+| `coverage_before` / `coverage_after` | SAMHITA observation vs. post-patch re-check — **the same workload on both sides** |
+| `clause_total` / `held` / `unsupported` | the re-check stage |
+| `unproved_siblings` | the sibling stage |
+| `shield_active` | whether a verified shield is deployed |
+| `iteration` / `max_iterations` | the patch loop |
 
-`pramaan/certificate.py`
-
-```python
-class CertificateGenerator:
-    def generate(
-        self,
-        finding_id: str,
-        evidence_graph: EvidenceGraph,
-        gauntlet_results: dict,
-        replay_count: int,
-        clauses_held: int,
-        total_clauses: int,
-    ) -> Certificate:
-        level = self._assign_level(gauntlet_results, replay_count, clauses_held, total_clauses)
-        evidence_hashes = self._collect_hashes(evidence_graph)
-        signature = self._sign(finding_id, level, evidence_hashes)
-        return Certificate(
-            cert_id=generate_uuid(),
-            finding_id=finding_id,
-            level=level,
-            evidence_hashes=evidence_hashes,
-            signed_at=utcnow_iso(),
-            signature=signature,
-        )
-```
+The coverage comparison is deliberate: comparing a single-request proof-of-vulnerability observation
+against a twelve-case corpus would report a large "behavioural change" that never happened, and drag
+every certificate to Level C for no reason.
 
 ---
 
-## Level assignment logic
+## The certificate document
 
-`pramaan/levels.py`
+`certificate.json` sections:
 
-```python
-def assign_level(
-    gauntlet: dict,
-    replay_count: int,
-    clauses_held: int,
-    total_clauses: int,
-    exploit_reproduced: int,
-    exploit_total: int,
-) -> Literal["A", "B", "C", "R"]:
+| Section | Contents |
+| --- | --- |
+| `assurance` | level, label, description, `not_a_formal_proof`, rationale, **limitations**, criteria |
+| `run` | id, short code, timings including **time to protection** and **time to repair**, tokens, egress |
+| `target` | repository, provider, branch, commit, **pinned source sha256**, authority timestamp |
+| `finding` | handle, severity, CWE, location, reachability, root cause (with `verified`), reproduction record |
+| `violated_clause` | the SAMHITA clause, its predicate, and its held-out survival count |
+| `shield` | mechanism, verified-blocked, verified-benign, revert command |
+| `patch` | iteration, status, diff hash, files, risk, expected effect, **constraints carried forward** |
+| `patch_history` | every iteration including refuted ones, with refutation summaries |
+| `verification` | the four stage verdicts with detail and case counts |
+| `blast_radius` | callers, modules, clauses, allowed paths, regression scope |
+| `samhita` | proposed / surviving / falsified counts, iterations, split sizes |
+| `execution_environment` | sandbox adapter, **`network_enforced`**, **`suitable_for_untrusted_code`**, egress |
+| `reasoning_provider` | which provider proposed, whether it **fell back to mock**, tokens per task |
+| `evidence_graph` | the full graph with hashes |
+| `signature` | algorithm, certificate hash, HMAC, and how to verify it |
 
-    stages = ("mutation", "sibling", "replay", "contract")
-    passed = sum(1 for s in stages if gauntlet.get(s) == "pass")
+Two things deliberately in there: the sandbox's honest capability flags, so a reader can see whether
+the execution boundary was real; and which provider produced the proposals, because "which model said
+this" is part of the evidence.
 
-    # R — patch was refuted
-    if passed == 0 and gauntlet.get("mutation") == "fail":
-        return "R"
-
-    # A — everything passes
-    if (passed == 4
-            and replay_count >= 5000
-            and clauses_held == total_clauses
-            and exploit_reproduced == exploit_total):
-        return "A"
-
-    # B — mostly passes
-    if (passed >= 3
-            and replay_count >= 1000
-            and clauses_held >= int(total_clauses * 0.8)):
-        return "B"
-
-    # C — exploit validated, patch builds, limited verification
-    if exploit_reproduced > 0:
-        return "C"
-
-    return "R"
-```
+One thing deliberately **not** in there: the working exploit. Certificates carry
+`pov_hash` and `pov_withheld: true`.
 
 ---
 
 ## Signing
 
-For the competition, signing uses HMAC-SHA256 with a run-scoped key.
-The key is derived from the run_id and a server secret — never stored in state.
-
-```python
-def sign_certificate(
-    cert_id: str,
-    finding_id: str,
-    level: str,
-    evidence_hashes: list[str],
-    server_secret: bytes,
-) -> str:
-    payload = json.dumps({
-        "cert_id": cert_id,
-        "finding_id": finding_id,
-        "level": level,
-        "evidence_hashes": sorted(evidence_hashes),
-    }, sort_keys=True).encode()
-    return hmac.new(server_secret, payload, hashlib.sha256).hexdigest()
 ```
+certificate_hash = sha256(canonical_json(document without "signature"))
+signature        = HMAC-SHA256(certificate_hash, CERTIFICATE_SIGNING_KEY)
+```
+
+`GET /api/certificates/{id}/verify` recomputes both from the stored document.
+
+**This is an HMAC, not a public-key signature.** It detects tampering by anyone without the key; it is
+not independently verifiable by a third party, because verification needs the same secret. The
+certificate says so in `signature.notes`. A production system would want an asymmetric signature and a
+published verification key — see [HONESTY.md](HONESTY.md) §4.
 
 ---
 
-## certificate.json output format
+## Deliverable documents
 
-This is what gets committed to the pull request:
+### `CHANGES.md`
 
-```json
-{
-  "cert_id": "cert-7f3a-001",
-  "run_id": "run-7f3a",
-  "finding_id": "V17",
-  "level": "A",
-  "signed_at": "2026-10-07T14:23:11Z",
-  "signature": "9c4e...",
-  "summary": {
-    "vulnerability": "heap buffer overflow in parse_header()",
-    "root_cause": "hdr.c:340 — signed comparison allows negative length",
-    "clause_violated": "C017 — header length bound",
-    "shield_deployed_at": "t+3m20s",
-    "patch_iteration": 2,
-    "exploit_reproduced": "10/10 pre-patch, 0/10 post-patch",
-    "replay": "5000/5000 byte-identical",
-    "clauses_held": "40/40",
-    "affected_callers": 14
-  },
-  "evidence_graph": {
-    "nodes": { ... },
-    "edges": [ ... ]
-  },
-  "evidence_hashes": [
-    "sha256:1f0c...",
-    "sha256:9c4e...",
-    "..."
-  ]
-}
-```
+One section per verified fix: vulnerability, root cause, violated clause, evidence, assurance level,
+blast radius, files changed, PR link.
 
----
+### `REMAINING.md`
 
-## What PRAMAAN never contains
+Seven sections, all generated from run state — nothing hand-authored per run:
 
-- Raw LLM outputs
-- Unverified claims
-- Boolean "proven" assertions without supporting evidence nodes
-- Anything not traceable to a deterministic artifact
+1. **Unvalidated hypotheses** — with *why* each could not be validated
+2. **Refuted patches** — with the refuting evidence and the constraints it produced
+3. **Falsified SAMHITA clauses** — a rejected clause is information about the target
+4. **Coverage gaps** — the percentage, and per-channel notes including channels that could not run
+5. **Unreachable code**
+6. **Remaining risk** — unproved siblings, incomplete verification, unrepaired findings, and the
+   execution boundary itself when the adapter is not one
+7. **Decisions requiring human review**
 
-Every node in the evidence graph must have a `ref` that points to
-a real, retrievable artifact. If the artifact doesn't exist, the node
-doesn't exist.
+It closes with an honesty statement naming what the run did not establish. `REMAINING.md` goes into
+the pull request alongside `CHANGES.md`, so a reviewer sees what was not proved in the same place as
+what was.
+
+A run that reports only its successes is a marketing document. The value of this system is that the
+ledger of what it could not establish is generated from the same state, with the same rigour, and
+cannot be omitted.

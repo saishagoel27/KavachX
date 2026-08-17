@@ -1,0 +1,101 @@
+# KavachX development stack.
+#
+# Three services and nothing else — no Kubernetes, no Redis, no vector database. The
+# specification avoids a vector store on purpose: KavachX's information is keyed and relational
+# (run → finding → patch → evidence node), so PostgreSQL is the right and only store.
+#
+#   docker compose up --build
+#
+# The backend container runs migrations and seeds the demo tenant on start, then serves on :8000.
+# The frontend serves on :3000. PostgreSQL is published on 5433 so it does not collide with a
+# local install.
+
+name: kavachx
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: kavachx
+      POSTGRES_PASSWORD: kavachx
+      POSTGRES_DB: kavachx
+      # Deterministic collation, so ordering in tests and in production agree.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kavachx -d kavachx"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://kavachx:kavachx@postgres:5432/kavachx
+      KAVACHX_ENV: development
+      DEV_MODE: "true"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      JWT_SECRET: ${JWT_SECRET:-compose-dev-secret-change-me-before-any-real-use}
+      CERTIFICATE_SIGNING_KEY: ${CERTIFICATE_SIGNING_KEY:-compose-dev-certificate-key}
+      CORS_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
+      # Reasoning provider. Leave GROQ_API_KEY unset to run fully offline on the deterministic
+      # mock proposer — the demo completes either way, and the certificate records which was used.
+      LLM_PROVIDER: ${LLM_PROVIDER:-groq}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_MODEL_WORKHORSE: ${GROQ_MODEL_WORKHORSE:-llama-3.3-70b-versatile}
+      GROQ_MODEL_ROUTER: ${GROQ_MODEL_ROUTER:-llama-3.1-8b-instant}
+      LLM_FALLBACK_TO_MOCK: "true"
+      # The container has no gVisor runtime, so the development adapter is what is available.
+      # It is NOT an isolation boundary; see docs/SECURITY.md.
+      SANDBOX_ADAPTER: ${SANDBOX_ADAPTER:-dev}
+      SANDBOX_WORKSPACE_ROOT: /workspaces
+      DEMO_REPO_PATH: /app/examples/vulnerable-demo
+      PUBLISHER_DRY_RUN: ${PUBLISHER_DRY_RUN:-true}
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
+      SEED_DEMO: "true"
+    ports:
+      - "8000:8000"
+    volumes:
+      # The seeded target is mounted read-only: KavachX analyses a pinned copy, never the source.
+      - ./examples:/app/examples:ro
+      - workspaces:/workspaces
+      - logs:/app/logs
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+    ports:
+      - "3000:3000"
+
+volumes:
+  postgres-data:
+  workspaces:
+  logs:

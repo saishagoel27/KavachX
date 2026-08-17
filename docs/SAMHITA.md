@@ -1,316 +1,224 @@
-# SAMHITA — Behavioural Contract Synthesis
+# SAMHITA — the executable behavioural contract
 
-*Saṃhitā: a systematically arranged, authoritative collection of rules.*
+SAMHITA is what KavachX reconstructs *before* looking for bugs. Not a document, not a policy file: a
+set of compiled, executable predicates over observed behaviour, each one of which had to survive an
+attempt to kill it.
 
-SAMHITA is the specification the target software never had.
-It is synthesised by observation, not written by hand.
-Once built, it serves three purposes:
-1. Directs the fuzzer (falsify clause N, not chase raw coverage)
-2. Defines a finding (a clause violation, not merely a crash)
-3. Serves as the regression harness after a patch
+```
+Benign Workload
+      ↓
+Observation                (tracing harness, inside the sandbox)
+      ↓
+Value Profiles             (bounds, ranges, enumerations, counters, containment)
+      ↓
+LLM Clause Proposal        ← the only step a model participates in
+      ↓
+Strict JSON Schema         (a schema failure is a model failure)
+      ↓
+Deterministic Clause Compiler   (restricted-AST whitelist)
+      ↓
+Held-out Trace Falsification    (against traces the proposer never saw)
+      ↓
+Surviving Clauses  →  SAMHITA
+```
 
 ---
 
-## Pipeline overview
+## Why observe first
 
-```
-observe target under benign workload
-  │
-  ▼
-record value profiles at every observable boundary
-  │
-  ▼
-LLM proposes candidate clauses  [schema-constrained call]
-  │
-  ▼
-deterministic falsifier runs each clause against held-out traces
-  │  clauses that fail → deleted immediately
-  │  clauses that pass → survivors
-  ▼
-survivors = the contract
-```
+A vulnerability is a violation of something. If you never write down what the software is supposed to
+do, "violation" collapses into "crash", and you lose every bug that does not crash — the injection
+that succeeds quietly, the traversal that returns the wrong file, the counter that goes backwards.
 
-Hallucinated clauses die in milliseconds and never reach a human.
+SAMHITA is that "supposed to do", derived from the software's own benign workload rather than from a
+specification nobody wrote.
 
 ---
 
-## What a clause looks like
+## Observation
 
-A clause is an executable predicate with metadata:
+The benign corpus is executed **inside the sandbox** under `app/sandbox/harness/kx_observe.py`, which
+traces with `sys.settrace` and records, per invocation:
+
+- the function, its file and line;
+- a **value profile** per argument — length, line count, numeric value, whether a string matches a
+  safe charset, how many shell metacharacters it contains;
+- the return profile — `ok`, `seq`, `op`, length, nullability;
+- executed lines, for **real** statement coverage computed against an `ast` statement count;
+- guard counters — shell invocations, blocked network attempts, reads outside the declared asset root.
+
+Two details in the tracer are load-bearing:
+
+**Frozen frames are excluded.** `Path("<frozen importlib._bootstrap>").resolve()` cheerfully produces
+a path *inside* the project root, which floods the observations with standard-library behaviour and
+buries the target's own. Filenames starting with `<` are rejected before resolution, and the result
+must be a file that exists.
+
+**Guard counters are per-case deltas, not running totals.** A cumulative counter is not comparable
+between two runs that executed different numbers of cases — a clause derived from a total would
+appear to break the moment the corpus size changed, reporting a regression with nothing behind it.
+Snapshotting before and after each case makes `shell_invocations == 1` mean "this operation spawns
+one shell", which is a statement about behaviour.
+
+---
+
+## The split
+
+Cases are split deterministically by id, **every third case held out**:
 
 ```python
-@dataclass
-class Clause:
-    clause_id:   str           # e.g. "C017"
-    predicate:   str           # executable expression in clause DSL
-    scope:       str           # "function:parse_header" | "module:auth" | "boundary:http_input"
-    obs_n:       int           # number of observations used to propose this
-    status:      str           # "active" | "refuted" | "superseded"
-    added_iter:  int           # synthesis iteration that produced this
-    description: str           # human-readable summary
+observation, holdout = split_cases(cases)   # 12 cases → 6 / 6
 ```
+
+Every third rather than a contiguous tail, because a tail split would let the proposer see all the
+small inputs and none of the large ones purely by ordering accident.
+
+The proposer sees **value profiles from the observation split only**. The falsifier tests against the
+held-out split. Neither ever sees the other's data.
+
+The observation split is executed **twice**, so response determinism is itself observable.
 
 ---
 
-## Clause DSL
+## Value profiles
 
-Clauses are written in a minimal, deterministic DSL.
-The DSL has no side effects. Every predicate is a pure boolean function
-over an observation record.
+Aggregates only — never raw values beyond a short enumeration. Six kinds, each proposing a different
+shape of clause:
 
-### Observation record structure
+| Kind | Derived when | Clause shape |
+| --- | --- | --- |
+| `length` | numeric, metric names a length or line count | `arg_lines_raw <= 8` |
+| `count` | numeric otherwise | `process_invocations <= 3` |
+| `zero` | numeric and never non-zero | `reads_outside_root == 0` |
+| `monotonic` | a counter observed non-decreasing | `ret_seq >= 1` |
+| `boolean` | all values boolean | `ret_ok == True` |
+| `enum` | few distinct short strings | `response_op in ["ping", "status", …]` |
+
+`zero` is the strongest claim available — "never observed at all during benign operation" — and the
+one an exploit is most likely to violate. `shell_command_metachars == 0` is exactly that, and it is
+the clause the command-injection finding breaks.
+
+---
+
+## The compiler is a whitelist
+
+`app/samhita/compiler.py` is why a hallucinated clause cannot become executable. The grammar is
+closed:
+
+```
+expr := comparison | boolop | unary | arith | atom
+atom := NAME | NUMBER | STRING | True | False | None | [atom,…] | (atom,…)
+```
+
+Rejected outright, not sanitised: calls, attribute access, subscripts, comprehensions, f-strings,
+lambdas, walrus assignments, statements, semicolons, newlines. `NAME` must resolve to a metric present
+in the observation namespace. Evaluation runs with `{"__builtins__": {}}`.
+
+Two further rules:
+
+- **A predicate must contain a comparison.** `arg_len_raw` alone asserts nothing and could never fail.
+- **A predicate must reference a metric.** `1 <= 2` is not a clause about the software.
 
 ```python
-@dataclass
-class Observation:
-    boundary:   str            # where this was recorded
-    field:      str            # field or variable name
-    value:      Any            # the observed value
-    timestamp:  float
-    trace_id:   str
-    call_stack: list[str]
-```
-
-### DSL primitives
-
-```
-# Length bounds
-len(field) <= N
-len(field) >= N
-len(field) in range(N, M)
-
-# Type constraints
-type(field) == T
-field is not None
-field is None
-
-# Value bounds
-field <= N
-field >= N
-field in {v1, v2, v3}
-field not in {v1, v2, v3}
-
-# Monotonicity
-field >= prev(field)          # counter never decreases
-field <= prev(field)          # counter never increases
-
-# Determinism
-result(field) == result(field) # same input → same output
-
-# Absence of dangerous calls
-not calls(syscall="execve")
-not calls(syscall="system")
-not calls(fn="os.system")
-
-# Reachability
-not reachable(label="sink_X") given input_matches(pattern)
-
-# Composition
-clause_A and clause_B
-clause_A or clause_B
-not clause_A
-```
-
-### Example clauses
-
-```
-C001: len(http_header) <= 255
-C002: type(user_id) == int
-C003: auth_token is not None
-C004: not calls(syscall="execve") within scope(parse_input)
-C005: response_code in {200, 201, 400, 401, 403, 404, 500}
-C017: len(content_length_field) <= 10  # the one that gets violated
+compile_predicate("__import__('os').system('rm -rf /')")   # ClauseCompileError
+compile_predicate("open('/etc/passwd').read()")            # ClauseCompileError
+compile_predicate("obj.attribute == 1")                    # ClauseCompileError
+compile_predicate("values[0] == 1")                        # ClauseCompileError
+compile_predicate("arg_lines_raw <= 8")                    # compiles
 ```
 
 ---
 
-## Observer
+## Falsification is where trust comes from
 
-`samhita/observer.py`
+Four verdicts, and only one is admissible:
 
-Runs the target under a benign workload and records value profiles.
+| Verdict | Meaning |
+| --- | --- |
+| **SURVIVING** | Held on every applicable held-out record, and there was at least one. **Admissible as evidence.** |
+| **FALSIFIED** | A held-out record made it false. The counterexample is stored. |
+| **UNSUPPORTED** | No held-out record carried the metrics it needs. **Not admitted.** |
+| **UNCOMPILABLE** | Rejected by the compiler; never evaluated. |
 
-```python
-class Observer:
-    def run(
-        self,
-        target: dict,
-        corpus_ref: str,
-        sandbox_runner: SandboxRunner,
-    ) -> list[BoundaryProfile]:
-        ...
+The `UNSUPPORTED` case is the subtle one. A clause nobody could contradict is not the same as a clause
+nobody did contradict, and treating it as evidence would be exactly the unfalsifiable claim this
+system exists to avoid. So it is discarded.
+
+`evaluate()` also distinguishes **not-applicable from false**: a record missing a metric the predicate
+needs returns `None`, not `False`. Conflating them would falsify clauses using observations that never
+claimed to describe them.
+
+```
+C027  input_length_bound        FALSIFIED
+predicate  arg_len_fmt <= 3
+reason     held-out case 008-export-json contradicts it (arg_len_fmt=4)
+verdict    not admissible as evidence
 ```
 
-A `BoundaryProfile` captures:
-```python
-@dataclass
-class BoundaryProfile:
-    boundary:    str
-    field:       str
-    samples:     list[Any]
-    min_val:     Any
-    max_val:     Any
-    null_rate:   float
-    type_dist:   dict[str, float]   # {"int": 0.95, "str": 0.05}
-    cardinality: int                # number of distinct values seen
-    sample_traces: list[str]        # 3 representative trace IDs
-```
-
-The observer runs **inside the sandbox** (execution profile).
-It never runs on the host.
+A typical run on the seeded target: **72 surviving, 20 falsified**. Those twenty are the mechanism
+working. They appear in `REMAINING.md`, because a rejected clause is itself information about the
+target.
 
 ---
 
-## Proposer
+## The clause iteration (≤ 2)
 
-`samhita/proposer.py`
+Iteration 1 proposes from the observation split. Bounds taken from a partial sample are often too
+tight, and the falsifier kills them.
 
-LLM call: given boundary profiles, propose candidate clauses.
+Iteration 2 gets **one** chance: falsified numeric bounds widen to the value that broke them, enum
+memberships gain the value that broke them, and the widened clause is re-falsified against the same
+held-out split. A `zero` metric that turns out to occur in held-out traces is reclassified as `count`,
+because "never happens" was simply wrong.
 
-### Input schema (sent to LLM)
+An enum that would need more than `MAX_ENUM_CARDINALITY` members is dropped rather than widened — a
+membership clause over everything asserts nothing.
 
-```json
-{
-  "boundary": "parse_header",
-  "profiles": [
-    {
-      "field": "content_length",
-      "min": 0,
-      "max": 8192,
-      "null_rate": 0.0,
-      "type": "int",
-      "cardinality": 847,
-      "sample_traces": ["t001", "t002", "t003"]
-    }
-  ],
-  "sample_observations": [...]
-}
-```
-
-### Output schema (LLM must return)
-
-```json
-{
-  "clauses": [
-    {
-      "predicate": "len(content_length) <= 10",
-      "scope": "function:parse_header",
-      "description": "content_length field never exceeds 10 characters",
-      "confidence": 0.92
-    }
-  ]
-}
-```
-
-The output is **schema-validated** before any clause is accepted.
-If the LLM returns malformed JSON or violates the schema, the call is
-retried once, then the boundary is skipped and logged to ledger.
-
-### What the LLM is NOT allowed to do here
-- Decide which clauses are "important"
-- Assign clause IDs (the system assigns those)
-- Modify existing clauses
-- Produce clauses outside the DSL grammar
+Then it stops. `clause ≤ 2` is a hard ceiling.
 
 ---
 
-## Falsifier
+## How clauses become evidence
 
-`samhita/falsifier.py`
+**At validation.** After an exploit reproduces, the validator re-observes it under tracing and
+evaluates every surviving clause against that trace. Clauses that are now false are the finding's
+**contract violation**. That is what makes a finding contract-grounded — not "a crash happened" but
+"clause C088, which survived held-out falsification, is false here".
 
-Deterministic. No LLM involved.
+When several clauses break, the reported one is chosen by **specificity**, not by iteration order: a
+clause scoped to the offending function beats one scoped to its file, which beats a global counter that
+also happens to be false. The certificate quotes whichever one this picks, so picking well matters.
 
-For each proposed clause:
-1. Run the clause predicate against all held-out traces
-2. If any trace falsifies the predicate → delete the clause
-3. If all traces satisfy the predicate → clause survives
+**At re-check.** Stage 4 of the Refutation Gauntlet re-evaluates every in-scope clause on the patched
+build. Two distinct failures, both refutations:
 
-```python
-class Falsifier:
-    def run(
-        self,
-        proposed_clauses: list[Clause],
-        held_out_traces: list[Trace],
-    ) -> list[Clause]:
-        survivors = []
-        for clause in proposed_clauses:
-            if all(self._evaluate(clause, trace) for trace in held_out_traces):
-                survivors.append(clause)
-        return survivors
-
-    def _evaluate(self, clause: Clause, trace: Trace) -> bool:
-        # compile predicate to Python callable
-        # execute against trace observations
-        # return True if predicate holds, False if falsified
-        ...
-```
-
-The falsifier is the gatekeeper. Nothing the LLM proposes can survive
-without passing this deterministic check.
+- a clause that held before is now **falsified** — the patch broke a contract;
+- a clause that held before is now **unsupported** — the code path it described no longer executes.
+  That is a silent behavioural change, and treating it as a pass would let a patch delete
+  functionality and call it a fix.
 
 ---
 
-## Evaluator
+## Clause kinds in the demo run
 
-`samhita/evaluator.py`
+| Clause | Predicate | Scope | Violated by |
+| --- | --- | --- | --- |
+| `C088` | `arg_safe_charset_report_name == True` | `exporter.py:_archiver_command` | command injection |
+| `C011` | `shell_command_metachars == 0` | global | command injection |
+| `C060` | `arg_lines_raw <= 8` | `parser.py:parse_header` | header overflow |
+| `C007` | `reads_outside_root == 0` | global | path traversal |
+| `C009` | `response_ok == True` | global | any crash |
 
-Used at two points:
-1. During falsification (above)
-2. During the gauntlet contract stage — re-evaluates all active clauses
-   against post-patch traces
-
-```python
-class Evaluator:
-    def evaluate_all(
-        self,
-        clauses: list[Clause],
-        traces: list[Trace],
-    ) -> dict[str, bool]:
-        # returns {clause_id: passed}
-        ...
-
-    def evaluate_one(
-        self,
-        clause: Clause,
-        trace: Trace,
-    ) -> bool:
-        ...
-```
+Every one derived from observation, compiled through the whitelist, and survived a held-out attempt to
+kill it.
 
 ---
 
-## Iteration cap
+## Limits
 
-Clause refinement is capped at **2 iterations**.
-
-If after 2 rounds the contract has fewer than 5 surviving clauses,
-the run continues with what it has and logs the shortfall to ledger.
-It does not loop indefinitely.
-
----
-
-## Contract quality signals
-
-After synthesis, the contract is assessed:
-
-| Signal | Threshold | Action if below |
-|---|---|---|
-| Clause count | ≥ 5 | Log warning, continue |
-| Clause count | ≥ 20 | Good — proceed normally |
-| Falsification rate | < 80% surviving | Log — LLM proposals were poor quality |
-| Coverage of boundaries | ≥ 60% | Log warning if below |
-
-These are observability signals, not hard stops.
-
----
-
-## Output
-
-After synthesis, `state["samhita"]` contains the active contract.
-`state["benign_corpus_ref"]` points to the recorded traces used for falsification.
-
-Both are used throughout the rest of the pipeline:
-- Discovery channels use clause IDs to direct fuzzing
-- Gauntlet contract stage re-evaluates all clauses post-patch
-- PRAMAAN references specific clause IDs in the evidence graph
-- REMAINING.md lists any clauses that were refuted during the run
+- SAMHITA is only as good as the benign corpus. A thin corpus yields few clauses and a low coverage
+  figure — and the coverage figure travels into every certificate for exactly that reason.
+- Metrics are extracted by the harness. A behaviour nobody thought to measure cannot be constrained.
+- Clauses are per-invocation predicates. Cross-invocation temporal properties ("never after") are not
+  expressible in this grammar.
+- The corpus is the *target's own*. If it does not exercise a path, no clause describes that path.

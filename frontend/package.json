@@ -1,26 +1,40 @@
 {
-  "name": "frontend",
+  "name": "kavachx-frontend",
+  "version": "1.0.0",
   "private": true,
-  "version": "0.0.0",
-  "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
-    "lint": "oxlint",
-    "preview": "vite preview"
+    "dev": "next dev -p 3000",
+    "build": "next build",
+    "start": "next start -p 3000",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "lucide-react": "^1.31.0",
-    "react": "^19.2.8",
-    "react-dom": "^19.2.8"
+    "next": "16.3.1",
+    "react": "19.0.0",
+    "react-dom": "19.0.0",
+    "@monaco-editor/react": "4.7.0",
+    "recharts": "3.10.1",
+    "framer-motion": "11.18.2",
+    "lucide-react": "0.474.0",
+    "clsx": "2.1.1",
+    "tailwind-merge": "2.6.0",
+    "class-variance-authority": "0.7.1"
   },
   "devDependencies": {
-    "@types/node": "^24.13.3",
-    "@types/react": "^19.2.17",
-    "@types/react-dom": "^19.2.3",
-    "@vitejs/plugin-react": "^6.0.4",
-    "oxlint": "^1.75.0",
-    "typescript": "~6.0.2",
-    "vite": "^8.2.0"
+    "@types/node": "22.10.7",
+    "@types/react": "19.0.7",
+    "@types/react-dom": "19.0.3",
+    "autoprefixer": "10.4.20",
+    "postcss": "8.5.26",
+    "tailwindcss": "3.4.17",
+    "typescript": "5.7.3",
+    "eslint": "9.39.5",
+    "eslint-config-next": "16.3.1"
+  },
+  "overrides": {
+    "postcss": "8.5.26",
+    "dompurify": "^3.2.4",
+    "monaco-editor": "0.53.0"
   }
 }

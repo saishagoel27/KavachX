@@ -1,0 +1,52 @@
+# Minimal scrape config for a local KavachX instance.
+#
+#   docker run --rm -p 9090:9090 \
+#     -v "$PWD/infrastructure/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml" \
+#     prom/prometheus
+#
+# Metrics worth a panel each:
+#   kavachx_runs_finished_total{status}          did runs complete or fail
+#   kavachx_run_duration_seconds                end-to-end wall clock
+#   kavachx_phase_duration_seconds{phase}       which phase dominates
+#   kavachx_model_tokens_total{provider,direction}
+#   kavachx_model_schema_violations_total{task} how often model output was rejected
+#   kavachx_sandbox_egress_bytes_total          MUST stay at zero
+#   kavachx_sandbox_network_attempts_total      blocked outbound attempts
+#   kavachx_gauntlet_stage_results_total{stage,verdict}
+#   kavachx_gauntlet_failures_total{stage}      which stage refutes patches most
+#   kavachx_patch_iterations                    how many attempts a repair needs
+#   kavachx_certificates_issued_total{level}    the assurance distribution
+#   kavachx_coverage_percent{run}
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    system: kavachx
+
+scrape_configs:
+  - job_name: kavachx-backend
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:8000"]
+        labels:
+          service: backend
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+# An alert worth having: egress must never move.
+#
+# rule_files:
+#   - alerts.yml
+#
+# groups:
+#   - name: kavachx
+#     rules:
+#       - alert: SandboxEgressDetected
+#         expr: increase(kavachx_sandbox_egress_bytes_total[5m]) > 0
+#         for: 1m
+#         labels: { severity: critical }
+#         annotations:
+#           summary: "Bytes left the KavachX sandbox — the execution boundary leaked"

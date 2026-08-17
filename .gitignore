@@ -1,0 +1,57 @@
+# --- secrets ---------------------------------------------------------------
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+!examples/**/*.key
+
+# --- python ----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+*.db
+*.db-journal
+.pytest-kavachx.db
+
+# --- node ------------------------------------------------------------------
+node_modules/
+.next/
+out/
+next-env.d.ts
+npm-debug.log*
+yarn-error.log*
+.tsbuildinfo
+*.tsbuildinfo
+
+# --- kavachx runtime state -------------------------------------------------
+# Sandbox workspaces and generated artifacts. Regenerated on every run.
+.kavachx/
+logs/
+scratch_*.py
+
+# --- demo target build output ---------------------------------------------
+examples/vulnerable-demo/exports/
+examples/vulnerable-demo/service.config.json
+examples/vulnerable-c-demo/hdrparse
+examples/vulnerable-c-demo/hdrparse-asan
+examples/vulnerable-c-demo/fuzz_hdr
+examples/vulnerable-c-demo/test_hdr
+examples/vulnerable-c-demo/crash-*
+examples/vulnerable-c-demo/leak-*
+examples/vulnerable-c-demo/timeout-*
+*.dSYM/
+
+# --- editors / os ----------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp

@@ -1,0 +1,163 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --font-sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+  color-scheme: dark;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-family: var(--font-sans);
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+
+  ::selection {
+    background: rgba(0, 242, 255, 0.28);
+  }
+
+  /* Scrollbars: thin and quiet. A SOC console has a lot of scrollable panes and default
+     chrome scrollbars dominate them. */
+  ::-webkit-scrollbar {
+    width: 9px;
+    height: 9px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.11);
+    border-radius: 6px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.2);
+  }
+
+  :focus-visible {
+    outline: 2px solid theme("colors.accent.DEFAULT");
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  .panel {
+    @apply rounded-lg border border-border bg-surface/70 shadow-panel backdrop-blur-[2px];
+  }
+
+  .panel-header {
+    @apply flex items-center justify-between gap-3 border-b border-border px-4 py-2.5;
+  }
+
+  .panel-title {
+    @apply font-mono text-mono-label uppercase text-foreground-subtle;
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1.5 rounded border px-2 py-0.5 font-mono text-mono-label uppercase;
+  }
+
+  .chip-accent {
+    @apply border-accent/45 bg-accent/10 text-accent;
+  }
+  .chip-verified {
+    @apply border-verified/45 bg-verified/10 text-verified;
+  }
+  .chip-refuted {
+    @apply border-refuted/45 bg-refuted/10 text-refuted;
+  }
+  .chip-warn {
+    @apply border-warn/45 bg-warn/10 text-warn;
+  }
+  .chip-muted {
+    @apply border-border-strong bg-surface-high text-foreground-subtle;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium
+      transition-all duration-150 disabled:cursor-not-allowed disabled:opacity-45;
+  }
+
+  .btn-primary {
+    @apply btn bg-accent text-accent-on hover:shadow-glow;
+  }
+
+  .btn-secondary {
+    @apply btn border border-border-strong text-foreground hover:border-accent hover:text-accent;
+  }
+
+  .btn-ghost {
+    @apply btn text-foreground-muted hover:bg-surface-high hover:text-foreground;
+  }
+
+  .btn-danger {
+    @apply btn border border-refuted/50 text-refuted hover:bg-refuted/10;
+  }
+
+  .field {
+    @apply w-full rounded-md border border-border bg-surface-lowest px-3 py-2 text-sm
+      text-foreground placeholder:text-foreground-faint focus:border-accent/60 focus:outline-none
+      focus:ring-1 focus:ring-accent/30;
+  }
+
+  .label {
+    @apply mb-1.5 block font-mono text-mono-label uppercase text-foreground-subtle;
+  }
+
+  .grid-bg {
+    background-size: 26px 26px;
+    background-image:
+      linear-gradient(to right, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+  }
+
+  .noise {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    pointer-events: none;
+    opacity: 0.02;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+
+  .term {
+    @apply font-mono text-mono-data leading-[18px];
+  }
+
+  .hairline {
+    @apply h-px w-full bg-gradient-to-r from-transparent via-border-strong to-transparent;
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* Honour the OS reduced-motion setting: this UI animates a lot, and a security console
+     should not be the reason someone gets a headache. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}

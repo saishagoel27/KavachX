@@ -1,59 +1,104 @@
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
 [project]
-name = "kavachx"
-version = "0.1.0"
-requires-python = ">=3.11"
+name = "kavachx-backend"
+version = "1.0.0"
+description = "KavachX — graph-grounded autonomous cyber-reasoning with proof-carrying repair"
+requires-python = ">=3.11,<3.14"
+
 dependencies = [
-    # Orchestration
-    "langgraph>=0.2.0",
-    "langchain-core>=0.2.0",
-
-    # API
-    "fastapi>=0.111.0",
-    "uvicorn[standard]>=0.30.0",
-    "python-multipart>=0.0.9",
-    "sse-starlette>=2.1.0",
-
-    # Database
-    "sqlalchemy[asyncio]>=2.0.0",
-    "asyncpg>=0.29.0",
-    "alembic>=1.13.0",
-
-    # Auth / GitHub
-    "PyJWT>=2.8.0",
-    "cryptography>=42.0.0",
-    "httpx>=0.27.0",
-
-    # Validation
-    "pydantic>=2.7.0",
-    "pydantic-settings>=2.2.0",
-
-    # SMT solver
-    "z3-solver>=4.13.0",
-
-    # Utilities
-    "python-dotenv>=1.0.0",
-    "structlog>=24.1.0",
-    "anyio>=4.3.0",
+    # --- web ---------------------------------------------------------------
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "python-multipart>=0.0.12",
+    "sse-starlette>=2.1.3",
+    # --- config / validation ----------------------------------------------
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.6.0",
+    "email-validator>=2.2.0",
+    # --- database ----------------------------------------------------------
+    "sqlalchemy[asyncio]>=2.0.36",
+    "alembic>=1.14.0",
+    "asyncpg>=0.30.0",
+    "greenlet>=3.1.1",
+    "aiosqlite>=0.20.0",
+    # --- auth --------------------------------------------------------------
+    "pyjwt[crypto]>=2.9.0",
+    "bcrypt>=4.2.0",
+    # --- orchestration -----------------------------------------------------
+    "langgraph>=0.2.45",
+    # --- analysis ----------------------------------------------------------
+    "tree-sitter>=0.23.0",
+    "tree-sitter-python>=0.23.0",
+    "tree-sitter-c>=0.23.0",
+    "tree-sitter-javascript>=0.23.0",
+    # --- llm providers -----------------------------------------------------
+    # Groq is the default hosted provider; llama.cpp covers the local/air-gapped path
+    # through the same OpenAI-compatible transport.
+    "groq>=0.13.0",
+    # --- http client (GitHub App / local model server) --------------------
+    "httpx>=0.27.2",
+    # --- observability -----------------------------------------------------
+    "prometheus-client>=0.21.0",
+    "logifyx>=1.1.3",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.2.0",
-    "pytest-asyncio>=0.23.0",
-    "pytest-httpx>=0.30.0",
-    "ruff>=0.4.0",
+    "pytest>=8.3.3",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
+    "httpx>=0.27.2",
+    "ruff>=0.7.0",
 ]
 
-[tool.hatch.build.targets.wheel]
-packages = ["kavachx"]
+[dependency-groups]
+dev = [
+    "pytest>=8.3.3",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
+    "ruff>=0.7.0",
+]
 
-[tool.ruff]
-target-version = "py311"
-line-length = 100
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+    "security: security-boundary regression tests",
+    "e2e: end-to-end pipeline tests (slower)",
+]
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = ["migrations/versions"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "SIM", "RUF"]
+ignore = [
+    "B008",    # FastAPI's Depends() in a default is the framework's own idiom
+    "RUF012",  # ClassVar on the enum-like constant classes adds noise, not safety
+    "SIM108",  # a ternary is not always clearer than an if/else
+    "E501",    # long lines are almost all prose in docstrings; `ruff format` owns wrapping
+    "SIM105",  # contextlib.suppress hides which exception was expected at the call site
+    "SIM102",  # nested ifs often separate two distinct conditions worth reading apart
+    "RUF001",  # em dashes and arrows in prose are deliberate
+    "RUF002",
+    "RUF003",
+    "RUF007",  # zip(a, a[1:]) reads more plainly than itertools.pairwise here
+]
+
+[tool.ruff.lint.per-file-ignores]
+# conftest sets environment variables that settings read at import time, so the app imports
+# must come after them.
+"tests/conftest.py" = ["E402"]
+"tests/*" = ["SIM113"]
+"migrations/*" = ["E402"]

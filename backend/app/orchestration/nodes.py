@@ -1,0 +1,2249 @@
+"""LangGraph node implementations.
+
+One node per pipeline phase. Each node:
+
+1. emits ``phase start``,
+2. does its work through the deterministic subsystems,
+3. persists what it learned,
+4. emits ``phase done`` / ``failed`` / ``blocked``,
+5. returns a state delta.
+
+The graph owns orchestration and state; the nodes own no control flow beyond their own step. Long
+work (sandbox execution, fuzzing, replay) is awaited on the event loop through the sandbox
+adapter, which runs it as an external process — so the graph process is never blocked on a
+compute-bound child.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import shutil
+import time
+import uuid
+from datetime import UTC, datetime
+from typing import Any
+
+from sqlalchemy import select
+
+from app.analysis.probe import confirm_descriptor, probe_payload
+from app.analysis.world_model import build_world_model
+from app.config import settings
+from app.core.hashing import sha256_json, sha256_text
+from app.core.logging import get_logger
+from app.db.session import session_scope
+from app.discovery import config_channel, fuzz_channel, runtime_channel, static_channel
+from app.discovery.queue import HypothesisQueue
+from app.gauntlet.runner import GauntletRunner
+from app.llm.base import LLMRequest, LLMTask
+from app.llm.contracts import ProbeProposal
+from app.models.analysis import Finding, Hypothesis, SamhitaClause, Shield
+from app.models.enums import (
+    PUBLISHABLE_PROVIDERS,
+    AssuranceLevel,
+    FindingState,
+    GauntletStage,
+    HypothesisStatus,
+    PatchStatus,
+    Phase,
+    RepositoryProvider,
+    RunStatus,
+)
+from app.models.pramaan import Certificate, EvidenceEdge, EvidenceNode
+from app.models.project import Policy, Repository
+from app.models.repair import GauntletResult, GauntletRun, Patch
+from app.models.run import Artifact, Run, RunCheckpoint
+from app.models.run import WorldModel as WorldModelRow
+from app.orchestration.state import FindingWork, KavachState, RunContext, now_iso, state_hash
+from app.patching import blast_radius, rootcause, synthesis
+from app.patching.policy import PolicyConfig
+from app.patching.policy import evaluate as evaluate_policy
+from app.pramaan import assurance as assurance_mod
+from app.pramaan import certificate as certificate_mod
+from app.pramaan import docs as docs_mod
+from app.samhita.engine import SamhitaEngine
+from app.samhita.observation import load_benign_corpus
+from app.sandbox import create_sandbox, materialise
+from app.sandbox.workspace import reset_work
+from app.validator.service import Validator
+
+logger = get_logger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+async def _update_run(run_id: uuid.UUID, **fields: Any) -> None:
+    async with session_scope() as db:
+        run = await db.get(Run, run_id)
+        if run is None:
+            return
+        for key, value in fields.items():
+            setattr(run, key, value)
+
+
+async def _run_row(run_id: uuid.UUID) -> dict[str, Any]:
+    async with session_scope() as db:
+        run = await db.get(Run, run_id)
+        if run is None:
+            return {}
+        repository = await db.get(Repository, run.repository_id)
+        return {
+            "run": {
+                "id": str(run.id),
+                "short_code": run.short_code,
+                "branch": run.branch,
+                "commit_sha": run.commit_sha,
+                "pinned_source_sha256": run.pinned_source_sha256,
+                "analysis_profile": run.analysis_profile,
+                "execution_profile": run.execution_profile,
+                "started_at": run.started_at.isoformat() if run.started_at else None,
+                "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+                "time_to_protection_ms": run.time_to_protection_ms,
+                "time_to_repair_ms": run.time_to_repair_ms,
+                "coverage_percent": run.coverage_percent,
+                "tokens_used": run.tokens_used,
+                "model_calls": run.model_calls,
+                "sandbox_executions": run.sandbox_executions,
+                "egress_bytes": run.egress_bytes,
+            },
+            "repository": {
+                "full_name": repository.full_name if repository else "",
+                "provider": repository.provider if repository else "",
+                "local_path": repository.local_path if repository else "",
+                "default_branch": repository.default_branch if repository else "main",
+                "installation_id": repository.installation_id if repository else None,
+                "authority_verified_at": (
+                    repository.authority_verified_at.isoformat()
+                    if repository and repository.authority_verified_at
+                    else None
+                ),
+            },
+        }
+
+
+async def _check_abort(ctx: RunContext) -> bool:
+    async with session_scope() as db:
+        run = await db.get(Run, ctx.run_id)
+        if run is not None and run.abort_requested:
+            ctx.abort_requested = True
+    return ctx.abort_requested
+
+
+async def _emit_metrics(ctx: RunContext) -> None:
+    metrics = ctx.refresh_metrics()
+    await ctx.emitter.metric(
+        tokens=metrics["tokens"],
+        coverage=metrics["coverage"],
+        ram_mb=metrics["peak_ram_mb"],
+        egress=metrics["egress_bytes"],
+        model_calls=metrics["model_calls"],
+        sandbox_executions=metrics["sandbox_executions"],
+        cpu_seconds=metrics["cpu_seconds"],
+    )
+    await _update_run(
+        ctx.run_id,
+        tokens_used=metrics["tokens"],
+        model_calls=metrics["model_calls"],
+        sandbox_executions=metrics["sandbox_executions"],
+        coverage_percent=metrics["coverage"],
+        peak_ram_mb=metrics["peak_ram_mb"],
+        cpu_seconds=metrics["cpu_seconds"],
+        egress_bytes=metrics["egress_bytes"],
+    )
+
+
+async def _emit_tools(ctx: RunContext, events: list[dict[str, Any]]) -> None:
+    for event in events:
+        await ctx.emitter.tool(
+            name=str(event.get("name", "")),
+            target=str(event.get("target", "")),
+            ms=int(event.get("ms", 0)),
+            ok=bool(event.get("ok", False)),
+            detail=str(event.get("detail", ""))[:400],
+        )
+
+
+async def _set_phase(ctx: RunContext, phase: str) -> None:
+    async with session_scope() as db:
+        run = await db.get(Run, ctx.run_id)
+        if run is None:
+            return
+        run.phase = phase
+        statuses = dict(run.phase_status or {})
+        statuses[phase] = "running"
+        run.phase_status = statuses
+
+
+async def _mark_phase(ctx: RunContext, phase: str, status: str) -> None:
+    async with session_scope() as db:
+        run = await db.get(Run, ctx.run_id)
+        if run is None:
+            return
+        statuses = dict(run.phase_status or {})
+        statuses[phase] = status
+        run.phase_status = statuses
+
+
+async def checkpoint(ctx: RunContext, node: str, state: KavachState) -> None:
+    """Persist state after a node. Called by the graph wrapper, not by nodes."""
+    ctx.checkpoint_seq += 1
+    async with session_scope() as db:
+        db.add(
+            RunCheckpoint(
+                tenant_id=ctx.tenant_id,
+                run_id=ctx.run_id,
+                seq=ctx.checkpoint_seq,
+                node=node,
+                state_json=dict(state),
+                state_hash=state_hash(state),
+            )
+        )
+
+
+async def _store_artifact(
+    ctx: RunContext,
+    *,
+    kind: str,
+    name: str,
+    content: str,
+    media_type: str = "text/markdown",
+    meta: dict[str, Any] | None = None,
+) -> str:
+    digest = sha256_text(content)
+    async with session_scope() as db:
+        artifact = Artifact(
+            tenant_id=ctx.tenant_id,
+            run_id=ctx.run_id,
+            kind=kind,
+            name=name,
+            media_type=media_type,
+            content=content,
+            content_hash=digest,
+            size_bytes=len(content.encode("utf-8")),
+            url=f"{settings.api_prefix}/runs/{ctx.run_id}/artifacts/{name}",
+            meta_json=meta or {},
+        )
+        db.add(artifact)
+        await db.flush()
+        url = artifact.url
+    await ctx.emitter.artifact(kind=kind, url=url, name=name, digest=digest)
+    return url
+
+
+# ---------------------------------------------------------------------------
+# 1. ingest
+# ---------------------------------------------------------------------------
+async def node_ingest(ctx: RunContext, state: KavachState) -> KavachState:
+    phase = Phase.INGEST.value
+    await _set_phase(ctx, phase)
+    await ctx.emitter.phase_start(phase, "materialising the pinned source artifact")
+
+    rows = await _run_row(ctx.run_id)
+    repository = rows.get("repository", {})
+    run = rows.get("run", {})
+
+    from pathlib import Path
+
+    provider = str(repository.get("provider", ""))
+    source_path = repository.get("local_path") or ""
+    fetch_evidence: dict[str, Any] = {}
+    resolved_commit = run.get("commit_sha") or ""
+
+    if provider == RepositoryProvider.GITHUB_PUBLIC.value:
+        # Fetch happens here, outside the sandbox, and the tree is hashed before anything runs.
+        # The sandbox never reaches the network, so it can never fetch its own source.
+        from app.github import public_ingest
+
+        staging = ctx.workspace_root / f"fetch-{ctx.short_code.lower()}-{ctx.run_id.hex[:6]}"
+        await ctx.emitter.phase_start(
+            phase, f"fetching public source for {repository.get('full_name', '')}"
+        )
+        started = time.perf_counter()
+        try:
+            fetch_evidence = await public_ingest.ingest(
+                full_name=str(repository.get("full_name", "")),
+                revision=resolved_commit or str(run.get("branch") or "") or "",
+                destination=staging,
+            )
+        except Exception as exc:
+            await ctx.emitter.phase_failed(phase, f"source fetch failed: {exc}")
+            await _mark_phase(ctx, phase, "failed")
+            state["errors"] = [
+                *state.get("errors", []),
+                {"phase": phase, "error": f"fetch failed: {exc}", "at": now_iso()},
+            ]
+            state["aborted"] = True
+            return state
+
+        resolved_commit = str(fetch_evidence["commit"]["sha"])
+        source_path = str(staging)
+        await ctx.emitter.tool(
+            name="github:public-ingest",
+            target=f"{repository.get('full_name', '')}@{resolved_commit[:12]}",
+            ms=int((time.perf_counter() - started) * 1000),
+            ok=True,
+            detail=(
+                f"{fetch_evidence['download']['members_extracted']} files, "
+                f"{fetch_evidence['download']['archive_bytes']} archive bytes, "
+                f"{len(fetch_evidence['download']['skipped'])} unsafe members skipped"
+            ),
+        )
+        skipped = fetch_evidence["download"]["skipped"]
+        if skipped:
+            await ctx.emitter.log(
+                f"skipped {len(skipped)} unsafe archive member(s): "
+                + ", ".join(f"{s['name']} ({s['reason']})" for s in skipped[:5]),
+                stream="stderr",
+                source="ingest",
+            )
+
+    if not source_path:
+        await ctx.emitter.phase_failed(phase, "the repository has no resolvable source location")
+        await _mark_phase(ctx, phase, "failed")
+        state["errors"] = [
+            *state.get("errors", []),
+            {"phase": phase, "error": "no source path", "at": now_iso()},
+        ]
+        state["aborted"] = True
+        return state
+
+    pinned = materialise(
+        source=Path(source_path),
+        workspace_root=ctx.workspace_root,
+        run_short=ctx.short_code,
+    )
+    ctx.pinned = pinned
+
+    # The fetched staging copy has served its purpose; pristine/ is now the pinned artifact.
+    if provider == RepositoryProvider.GITHUB_PUBLIC.value and fetch_evidence:
+        shutil.rmtree(source_path, ignore_errors=True)
+
+    ctx.sandbox = create_sandbox(workspace=pinned.work, execution_profile=ctx.execution_profile)
+    await ctx.sandbox.start()
+
+    capabilities = ctx.sandbox.capabilities()
+    await ctx.emitter.log(
+        f"sandbox adapter '{capabilities.adapter}' — {capabilities.isolation_model}",
+        source="sandbox",
+    )
+    if not capabilities.suitable_for_untrusted_code:
+        await ctx.emitter.log(f"WARNING: {capabilities.notes}", stream="stderr", source="sandbox")
+
+    await _update_run(
+        ctx.run_id,
+        pinned_source_sha256=pinned.content_sha256,
+        workspace_path=str(pinned.root),
+        # A resolved commit SHA is what makes a public-repo run reproducible: `main` moves, a SHA
+        # does not. Local targets have no commit, so they pin by content hash instead.
+        commit_sha=resolved_commit or pinned.content_sha256[:40],
+    )
+
+    state["target"] = {
+        "repository": repository.get("full_name", ""),
+        "provider": repository.get("provider", ""),
+        "publishable": provider in PUBLISHABLE_PROVIDERS,
+        "branch": run.get("branch", ""),
+        "commit_sha": resolved_commit or pinned.content_sha256[:40],
+        "fetch": fetch_evidence.get("commit", {}),
+        "pinned_source_sha256": pinned.content_sha256,
+        "file_count": pinned.file_count,
+        "total_bytes": pinned.total_bytes,
+        "workspace": str(pinned.root),
+        "sandbox": capabilities.as_dict(),
+    }
+    state["phase"] = phase
+
+    await ctx.emitter.thought(
+        agent="INGEST",
+        hypothesis="The analysis target must be an immutable, content-addressed artifact.",
+        evidence=[
+            f"source: {source_path}",
+            f"files: {pinned.file_count}",
+            f"sha256: {pinned.content_sha256[:16]}",
+        ],
+        decision=(
+            "Source pinned and copied into the sandbox workspace. The repository is never "
+            "fetched from inside the sandbox."
+        ),
+        confidence=1.0,
+    )
+    await _emit_metrics(ctx)
+    await ctx.emitter.phase_done(
+        phase, f"{pinned.file_count} files pinned at sha256:{pinned.content_sha256[:12]}"
+    )
+    await _mark_phase(ctx, phase, "completed")
+    return state
+
+
+# ---------------------------------------------------------------------------
+# 2. probe + 3. index + 4. world model
+# ---------------------------------------------------------------------------
+async def node_index_repo(ctx: RunContext, state: KavachState) -> KavachState:
+    assert ctx.pinned is not None
+
+    # -- index -------------------------------------------------------------
+    phase = Phase.INDEX.value
+    await _set_phase(ctx, phase)
+    await ctx.emitter.phase_start(phase, "indexing with tree-sitter")
+
+    model = await asyncio.to_thread(build_world_model, ctx.pinned.work)
+    ctx.world_model = model
+    summary = model.summary()
+
+    await ctx.emitter.tool(
+        name="tree-sitter",
+        target=f"{summary['files']} files",
+        ms=0,
+        ok=True,
+        detail=(
+            f"{summary['functions']} functions, {summary['classes']} classes, "
+            f"{summary['call_edges']} call edges "
+            f"({model.index_summary.get('by_indexer', {})})"
+        ),
+    )
+    await ctx.emitter.phase_done(phase, f"{summary['files']} files indexed")
+    await _mark_phase(ctx, phase, "completed")
+
+    # -- probe -------------------------------------------------------------
+    phase = Phase.PROBE.value
+    await _set_phase(ctx, phase)
+    await ctx.emitter.phase_start(phase, "identifying interfaces and entrypoints")
+
+    proposal: dict[str, Any] = {}
+    try:
+        response = await ctx.provider.generate(
+            LLMRequest(
+                task=LLMTask.PROBE_INTERFACES,
+                instruction=(
+                    "Identify the externally reachable interfaces of this target and how to "
+                    "build and test it. Every field you return is confirmed against the "
+                    "filesystem before use."
+                ),
+                payload=probe_payload(model),
+                schema=ProbeProposal,
+                model_hint="router",
+            )
+        )
+        proposal = response.parsed.model_dump()
+    except Exception as exc:
+        await ctx.emitter.log(
+            f"interface proposal unavailable ({str(exc)[:160]}); falling back to graph-derived "
+            "entrypoints",
+            stream="stderr",
+            source="probe",
+        )
+
+    descriptor = confirm_descriptor(ctx.pinned.work, model, proposal=proposal)
+    ctx.descriptor = descriptor
+
+    await ctx.emitter.thought(
+        agent="PROBE",
+        hypothesis="The target exposes a single CLI entrypoint taking one JSON request.",
+        evidence=descriptor.confirmation_notes[:6],
+        decision=(
+            f"Entrypoint confirmed: {descriptor.entry_file}:{descriptor.entry_callable}"
+            if descriptor.confirmed
+            else "No entrypoint could be confirmed on disk."
+        ),
+        confidence=0.9 if descriptor.confirmed else 0.2,
+    )
+
+    ctx.benign_cases = (
+        load_benign_corpus(ctx.pinned.work / descriptor.corpus_dir) if descriptor.corpus_dir else []
+    )
+    state["benign_corpus_ref"] = sha256_json([c["request"] for c in ctx.benign_cases])
+
+    # A confirmed entrypoint plus a benign corpus is what the *dynamic* half of the pipeline needs:
+    # SAMHITA observation, fuzzing, runtime observation, and execution-based validation. An
+    # arbitrary repository frequently has neither, and aborting there would mean KavachX could only
+    # ever analyse targets shaped like its own demo.
+    #
+    # So the run degrades to static-only instead: index, world model, graph/static and
+    # config/reachability discovery, and findings that stay HYPOTHESIS with an honest reason. What
+    # it must never do is present a static-only run as if it had executed anything — hence the
+    # explicit mode flag, which travels into REMAINING.md and every certificate.
+    ctx.static_only = not (descriptor.confirmed and ctx.benign_cases)
+    state["mode"] = "static_only" if ctx.static_only else "full"
+
+    if ctx.static_only:
+        reasons: list[str] = []
+        if not descriptor.confirmed:
+            reasons.append("no entrypoint could be confirmed on disk")
+        if not ctx.benign_cases:
+            reasons.append(
+                f"no benign workload was found at "
+                f"{descriptor.corpus_dir or 'corpus/benign'} to observe"
+            )
+        detail = "; ".join(reasons)
+        state["static_only_reason"] = detail
+        # Persisted, not just streamed: whoever opens this run later must see the qualifier too.
+        await _update_run(ctx.run_id, mode="static_only", static_only_reason=detail)
+
+        await ctx.emitter.phase_blocked(phase, f"static-only analysis: {detail}")
+        await _mark_phase(ctx, phase, "blocked")
+        await ctx.emitter.thought(
+            agent="PROBE",
+            hypothesis="This target can be executed and observed.",
+            evidence=[*descriptor.confirmation_notes[:4], detail],
+            decision=(
+                "STATIC-ONLY MODE. Nothing will be executed, so no finding in this run can be "
+                "validated by reproduction, no SAMHITA contract can be built, and no patch will "
+                "be attempted. Candidates are reported as unproven hypotheses."
+            ),
+            confidence=1.0,
+        )
+        await ctx.emitter.log(
+            "Static-only analysis: "
+            + detail
+            + ". Findings will remain hypotheses — treat them as leads, not as proven "
+            "vulnerabilities.",
+            stream="stderr",
+            source="probe",
+        )
+    else:
+        await ctx.emitter.phase_done(
+            phase,
+            f"{descriptor.entry_file}:{descriptor.entry_callable} · "
+            f"{len(ctx.benign_cases)} benign cases",
+        )
+        await _mark_phase(ctx, phase, "completed")
+
+    # -- world model -------------------------------------------------------
+    phase = Phase.WORLD_MODEL.value
+    await _set_phase(ctx, phase)
+    await ctx.emitter.phase_start(phase, "building the structured world model")
+
+    graph_json = model.as_graph_json()
+    content_hash = model.content_hash()
+    async with session_scope() as db:
+        db.add(
+            WorldModelRow(
+                tenant_id=ctx.tenant_id,
+                run_id=ctx.run_id,
+                commit_sha=str(state.get("target", {}).get("commit_sha", "")),
+                content_hash=content_hash,
+                file_count=summary["files"],
+                function_count=summary["functions"],
+                entrypoint_count=summary["entrypoints"],
+                sink_count=summary["sinks"],
+                indexer=model.graph_source,
+                graph_json=graph_json,
+            )
+        )
+
+    state["world"] = {
+        **summary,
+        "content_hash": content_hash,
+        "descriptor": descriptor.as_dict(),
+        "entrypoints": [e.as_dict() for e in model.entrypoints],
+        "sinks": [s.as_dict() for s in model.sinks[:80]],
+        "ports": model.ports,
+        "dependencies": model.dependencies,
+    }
+    state["phase"] = phase
+
+    await ctx.emitter.thought(
+        agent="WORLD MODEL",
+        hypothesis="Reasoning should query a graph of handles, not read the repository.",
+        evidence=[
+            f"{summary['functions']} functions indexed",
+            f"{summary['entrypoints']} entrypoints",
+            f"{summary['sinks']} candidate sinks",
+            f"graph source: {model.graph_source}",
+        ],
+        decision="World model built; the model receives handles and bounded code slices only.",
+        confidence=1.0,
+    )
+    await _emit_metrics(ctx)
+    await ctx.emitter.phase_done(
+        phase,
+        f"{summary['functions']} functions · {summary['entrypoints']} entrypoints · "
+        f"{summary['sinks']} sinks",
+    )
+    await _mark_phase(ctx, phase, "completed")
+    return state
+
+
+# ---------------------------------------------------------------------------
+# 5. SAMHITA
+# ---------------------------------------------------------------------------
+async def node_contract_synthesis(ctx: RunContext, state: KavachState) -> KavachState:
+    assert ctx.sandbox is not None and ctx.descriptor is not None and ctx.pinned is not None
+
+    phase = Phase.SAMHITA.value
+    await _set_phase(ctx, phase)
+
+    if ctx.static_only:
+        await ctx.emitter.phase_start(phase, "skipped — nothing to observe")
+        await ctx.emitter.phase_blocked(
+            phase,
+            "no behavioural contract: "
+            + str(state.get("static_only_reason", "the target cannot be observed")),
+        )
+        await _mark_phase(ctx, phase, "blocked")
+        await ctx.emitter.thought(
+            agent="SAMHITA",
+            hypothesis="A behavioural contract can be reconstructed from observed behaviour.",
+            evidence=[str(state.get("static_only_reason", ""))],
+            decision=(
+                "No contract was built. Findings in this run cannot be grounded in a violated "
+                "clause, which is a real reduction in evidence quality — not a formality."
+            ),
+            confidence=1.0,
+        )
+        state["samhita"] = []
+        return state
+
+    await ctx.emitter.phase_start(phase, "observing the benign workload")
+
+    engine = SamhitaEngine(
+        sandbox=ctx.sandbox,
+        provider=ctx.provider,
+        descriptor=ctx.descriptor,
+        workspace=ctx.pinned.work,
+    )
+    result = await engine.run()
+    ctx.samhita = result
+
+    await _emit_tools(ctx, result.tool_events)
+
+    if result.stats.get("error"):
+        await ctx.emitter.phase_failed(phase, str(result.stats.get("detail", "")))
+        await _mark_phase(ctx, phase, "failed")
+        state["errors"] = [
+            *state.get("errors", []),
+            {"phase": phase, "error": result.stats["error"], "at": now_iso()},
+        ]
+        # A run without a contract can still discover and validate; it just cannot ground
+        # findings in clauses. Continue rather than abort, and say so.
+        await ctx.emitter.log(
+            "SAMHITA produced no contract; findings in this run will not be clause-grounded.",
+            stream="stderr",
+            source="samhita",
+        )
+        state["samhita"] = []
+        return state
+
+    async with session_scope() as db:
+        for clause in result.clauses:
+            db.add(
+                SamhitaClause(
+                    tenant_id=ctx.tenant_id,
+                    run_id=ctx.run_id,
+                    clause_id=clause.clause_id,
+                    kind=clause.kind,
+                    description=clause.description[:800],
+                    predicate=clause.predicate,
+                    scope=clause.scope[:300],
+                    observation_count=clause.observation_count,
+                    status=clause.status,
+                    evidence_refs=clause.evidence_refs,
+                    falsification_reason=clause.falsification_reason,
+                    counterexample=clause.counterexample,
+                    holdout_pass_count=clause.holdout_pass_count,
+                    holdout_fail_count=clause.holdout_fail_count,
+                    proposed_by=clause.proposed_by,
+                    compiled_source=clause.compiled_source,
+                )
+            )
+
+    for clause in result.clauses:
+        await ctx.emitter.clause(
+            clause_id=clause.clause_id,
+            status=clause.status,
+            description=clause.description,
+            scope=clause.scope,
+            kind=clause.kind,
+        )
+
+    surviving = result.surviving
+    falsified = result.falsified
+    await ctx.emitter.thought(
+        agent="SAMHITA",
+        hypothesis=(
+            "A behavioural contract derived from benign observation can be used to detect "
+            "violations."
+        ),
+        evidence=[
+            f"observation cases: {result.stats.get('observation_cases', 0)}",
+            f"held-out cases: {result.stats.get('holdout_cases', 0)}",
+            f"value profiles: {result.stats.get('profiles', 0)}",
+            f"proposed: {result.stats.get('proposed', 0)}",
+            f"falsified by held-out traces: {len(falsified)}",
+        ],
+        decision=(
+            f"{len(surviving)} clauses survived held-out falsification and form SAMHITA. "
+            f"{len(falsified)} were rejected and cannot be used as evidence."
+        ),
+        confidence=0.9,
+    )
+
+    state["samhita"] = [c.as_dict() for c in result.clauses]
+    state["iter"] = {**state.get("iter", {}), "clause": result.iterations}
+    state["phase"] = phase
+    await _emit_metrics(ctx)
+    await ctx.emitter.phase_done(
+        phase,
+        f"{len(surviving)} surviving · {len(falsified)} falsified · "
+        f"{result.iterations} iteration(s) · coverage {result.coverage_percent:.1f}%",
+    )
+    await _mark_phase(ctx, phase, "completed")
+    return state
+
+
+# ---------------------------------------------------------------------------
+# 6. discovery fan-out
+# ---------------------------------------------------------------------------
+async def node_discovery_fanout(ctx: RunContext, state: KavachState) -> KavachState:
+    assert ctx.world_model is not None and ctx.descriptor is not None and ctx.sandbox is not None
+    samhita = ctx.samhita
+    if samhita is None:
+        from app.samhita.engine import SamhitaResult
+
+        samhita = SamhitaResult()
+
+    phase = Phase.DISCOVERY.value
+    await _set_phase(ctx, phase)
+    await ctx.emitter.phase_start(phase, "four channels, concurrently")
+
+    seeds = [c["request"] for c in ctx.benign_cases]
+    fuzz_budget = {"quick": 60, "standard": 160, "deep": 400}.get(ctx.analysis_profile, 160)
+
+    # No channel blocks another. Fuzzing and runtime observation both require an executable
+    # entrypoint, so in static-only mode they are not run at all — and their absence is recorded
+    # as a coverage gap rather than passed off as a clean sweep.
+    channels = [
+        static_channel.run(
+            model=ctx.world_model,
+            provider=ctx.provider,
+            samhita=samhita,
+            descriptor=ctx.descriptor,
+        ),
+        config_channel.run(model=ctx.world_model, descriptor=ctx.descriptor),
+    ]
+    if not ctx.static_only:
+        channels.extend(
+            [
+                fuzz_channel.run(
+                    sandbox=ctx.sandbox,
+                    model=ctx.world_model,
+                    descriptor=ctx.descriptor,
+                    seeds=seeds,
+                    budget=fuzz_budget,
+                ),
+                runtime_channel.run(
+                    model=ctx.world_model, descriptor=ctx.descriptor, samhita=samhita
+                ),
+            ]
+        )
+    results = await asyncio.gather(*channels, return_exceptions=True)
+
+    channel_results = []
+    for outcome in results:
+        if isinstance(outcome, BaseException):
+            await ctx.emitter.log(
+                f"a discovery channel failed: {outcome}", stream="stderr", source="discovery"
+            )
+            continue
+        channel_results.append(outcome)
+        await _emit_tools(ctx, outcome.tool_events)
+        for thought in outcome.thoughts:
+            await ctx.emitter.thought(
+                agent=thought["agent"],
+                hypothesis=thought["hypothesis"],
+                evidence=thought["evidence"],
+                decision=thought["decision"],
+                confidence=thought["confidence"],
+            )
+
+    ctx.channel_results = channel_results
+    candidates = [c for r in channel_results for c in r.candidates]
+
+    state["attack_graph"] = {
+        "channels": [r.as_dict() for r in channel_results],
+        "candidates": len(candidates),
+    }
+    state["phase"] = phase
+    await _emit_metrics(ctx)
+    await ctx.emitter.phase_done(
+        phase,
+        f"{len(candidates)} candidates from {len(channel_results)} channels",
+    )
+    await _mark_phase(ctx, phase, "completed")
+
+    # -- hypothesis queue --------------------------------------------------
+    phase = Phase.HYPOTHESIS_QUEUE.value
+    await _set_phase(ctx, phase)
+    await ctx.emitter.phase_start(phase, "correlating and prioritising")
+
+    async with session_scope() as db:
+        queue = HypothesisQueue(db, run_id=ctx.run_id, tenant_id=ctx.tenant_id)
+        stats = await queue.push_all(candidates)
+        snapshot = await queue.snapshot()
+
+    for entry in snapshot:
+        await ctx.emitter.finding(
+            handle=entry["handle"],
+            state="hypothesis",
+            severity=entry["severity"],
+            reachable=entry["reachability"] > 0.3,
+            clause=entry.get("candidate_clause_id") or None,
+            title=entry["description"][:200],
+        )
+
+    state["hypotheses"] = snapshot
+    state["priority"] = [e["handle"] for e in snapshot]
+    state["phase"] = phase
+    await ctx.emitter.thought(
+        agent="HYPOTHESIS QUEUE",
+        hypothesis="Correlated candidates should be validated in priority order.",
+        evidence=[
+            f"pushed: {stats.pushed}",
+            f"merged by correlation: {stats.merged}",
+            f"queued for validation: {stats.queued}",
+            f"no executable plan (unknown ledger): {stats.unknown}",
+            "priority = reachability x confidence x blast_radius",
+        ],
+        decision=f"{stats.queued} hypotheses queued; {stats.unknown} recorded as unknown.",
+        confidence=1.0,
+    )
+    await ctx.emitter.phase_done(
+        phase, f"{stats.queued} queued · {stats.merged} correlated · {stats.unknown} unknown"
+    )
+    await _mark_phase(ctx, phase, "completed")
+    return state
+
+
+# ---------------------------------------------------------------------------
+# 7. validation
+# ---------------------------------------------------------------------------
+async def node_validate(ctx: RunContext, state: KavachState) -> KavachState:
+    assert ctx.sandbox is not None and ctx.descriptor is not None and ctx.pinned is not None
+    samhita = ctx.samhita
+    if samhita is None:
+        from app.samhita.engine import SamhitaResult
+
+        samhita = SamhitaResult()
+
+    phase = Phase.VALIDATION.value
+    await _set_phase(ctx, phase)
+
+    if ctx.static_only:
+        await ctx.emitter.phase_start(phase, "skipped — the target cannot be executed")
+        async with session_scope() as db:
+            queue = HypothesisQueue(db, run_id=ctx.run_id, tenant_id=ctx.tenant_id)
+            reason = (
+                "Static-only run: "
+                + str(state.get("static_only_reason", "the target cannot be executed"))
+                + ". This candidate was never executed, so it is neither confirmed nor refuted."
+            )
+            for row in await queue.all():
+                if row.status == HypothesisStatus.QUEUED.value:
+                    await queue.transition(row, HypothesisStatus.UNKNOWN.value, reason)
+            ledger = await queue.ledger()
+
+        state["validated"] = []
+        state["downgraded"] = []
+        state["ledger"] = ledger
+        await ctx.emitter.thought(
+            agent="VALIDATOR",
+            hypothesis="Each candidate can be confirmed by executing it.",
+            evidence=[str(state.get("static_only_reason", "")), f"{len(ledger)} candidates queued"],
+            decision=(
+                "No candidate was validated, because nothing was executed. Every candidate is "
+                "reported as an unproven hypothesis in REMAINING.md."
+            ),
+            confidence=1.0,
+        )
+        await ctx.emitter.phase_blocked(
+            phase, f"{len(ledger)} candidate(s) left unproven — no execution in static-only mode"
+        )
+        await _mark_phase(ctx, phase, "blocked")
+        return state
+
+    await ctx.emitter.phase_start(phase, "executing verification jobs in the sandbox")
+
+    validator = Validator(
+        sandbox=ctx.sandbox,
+        descriptor=ctx.descriptor,
+        samhita=samhita,
+        workspace=ctx.pinned.work,
+    )
+
+    validated: list[dict[str, Any]] = []
+    downgraded: list[dict[str, Any]] = []
+    finding_counter = 0
+    max_validations = {"quick": 3, "standard": 8, "deep": 20}.get(ctx.analysis_profile, 8)
+    processed = 0
+
+    while processed < max_validations:
+        if await _check_abort(ctx):
+            break
+
+        async with session_scope() as db:
+            queue = HypothesisQueue(db, run_id=ctx.run_id, tenant_id=ctx.tenant_id)
+            hypothesis = await queue.next_queued()
+            if hypothesis is None:
+                break
+            hypothesis_snapshot = {
+                "id": hypothesis.id,
+                "handle": hypothesis.handle,
+                "description": hypothesis.description,
+                "location": hypothesis.location,
+                "severity": hypothesis.severity,
+                "cwe": hypothesis.cwe,
+                "source_channel": hypothesis.source_channel,
+                "plan": dict(hypothesis.validation_plan or {}),
+                "reachability": hypothesis.reachability,
+                "evidence_refs": list(hypothesis.evidence_refs or []),
+                "candidate_clause_id": hypothesis.candidate_clause_id,
+            }
+
+        processed += 1
+        outcome = await validator.validate(
+            hypothesis_snapshot["plan"], handle=hypothesis_snapshot["handle"]
+        )
+        await _emit_tools(ctx, outcome.tool_events)
+
+        if not outcome.reproduced:
+            async with session_scope() as db:
+                queue = HypothesisQueue(db, run_id=ctx.run_id, tenant_id=ctx.tenant_id)
+                row = await db.get(Hypothesis, hypothesis_snapshot["id"])
+                if row is not None:
+                    await queue.transition(
+                        row,
+                        HypothesisStatus.REFUTED.value,
+                        outcome.refutation_reason
+                        or "validation executed and did not reproduce the predicted behaviour",
+                        detail={"attempts": outcome.attempts[:6]},
+                    )
+                    row.unknown_reason = outcome.refutation_reason
+            await ctx.emitter.finding(
+                handle=hypothesis_snapshot["handle"],
+                state="refuted",
+                severity=hypothesis_snapshot["severity"],
+                reachable=hypothesis_snapshot["reachability"] > 0.3,
+                title=hypothesis_snapshot["description"][:200],
+            )
+            await ctx.emitter.thought(
+                agent="VALIDATOR",
+                hypothesis=hypothesis_snapshot["description"][:300],
+                evidence=[
+                    hypothesis_snapshot["location"],
+                    f"attempts: {len(outcome.attempts)}",
+                    f"plan: {hypothesis_snapshot['plan'].get('kind', '')}",
+                ],
+                decision=f"REFUTED — {outcome.refutation_reason[:220]}",
+                confidence=0.95,
+            )
+            downgraded.append(
+                {
+                    "handle": hypothesis_snapshot["handle"],
+                    "reason": outcome.refutation_reason,
+                    "location": hypothesis_snapshot["location"],
+                }
+            )
+            await _emit_metrics(ctx)
+            continue
+
+        # -- validated -----------------------------------------------------
+        finding_counter += 1
+        handle = f"V{finding_counter:02d}"
+        clause_record = (
+            samhita.clause_by_id(outcome.violated_clause_id) if outcome.violated_clause_id else None
+        )
+
+        async with session_scope() as db:
+            finding = Finding(
+                tenant_id=ctx.tenant_id,
+                run_id=ctx.run_id,
+                hypothesis_id=hypothesis_snapshot["id"],
+                handle=handle,
+                title=hypothesis_snapshot["description"][:400],
+                state=FindingState.VALIDATED.value,
+                severity=outcome.severity or hypothesis_snapshot["severity"],
+                cwe=hypothesis_snapshot["cwe"],
+                source_channel=hypothesis_snapshot["source_channel"],
+                violated_clause_id=outcome.violated_clause_id,
+                location=outcome.crash_site or hypothesis_snapshot["location"],
+                reachable=hypothesis_snapshot["reachability"] > 0.3,
+                reachability_score=hypothesis_snapshot["reachability"],
+                reproduced=True,
+                reproduction_count=outcome.reproduction_count,
+                exit_code=outcome.exit_code,
+                sanitizer_signal=outcome.sanitizer_signal[:200],
+                contract_violation=outcome.contract_violation[:400],
+                input_hash=outcome.input_hash,
+                output_hash=outcome.output_hash,
+                trace_hash=outcome.trace_hash,
+                coverage_percent=outcome.coverage_percent,
+                pov_payload=outcome.pov_payload,
+                pov_kind=outcome.pov_kind,
+                pov_hash=sha256_text(outcome.pov_payload) if outcome.pov_payload else "",
+                evidence_refs=hypothesis_snapshot["evidence_refs"],
+                validated_at=datetime.now(UTC),
+                status_label="VALIDATED",
+            )
+            db.add(finding)
+            await db.flush()
+            finding_id = finding.id
+
+            queue = HypothesisQueue(db, run_id=ctx.run_id, tenant_id=ctx.tenant_id)
+            row = await db.get(Hypothesis, hypothesis_snapshot["id"])
+            if row is not None:
+                await queue.transition(
+                    row,
+                    HypothesisStatus.VALIDATED.value,
+                    f"reproduced {outcome.reproduction_count}x in the sandbox; "
+                    f"promoted to finding {handle}",
+                    detail={"finding": handle, "signal": outcome.sanitizer_signal},
+                )
+
+        work = FindingWork(
+            handle=handle,
+            hypothesis_handle=hypothesis_snapshot["handle"],
+            finding_id=finding_id,
+            outcome=outcome,
+            channels=[c.strip() for c in hypothesis_snapshot["source_channel"].split(",") if c],
+            clause=clause_record.as_dict() if clause_record else None,
+            plan=hypothesis_snapshot["plan"],
+            coverage_before=outcome.coverage_percent,
+        )
+        ctx.findings[handle] = work
+
+        await ctx.emitter.finding(
+            handle=handle,
+            state="validated",
+            severity=finding_severity(outcome, hypothesis_snapshot),
+            reachable=hypothesis_snapshot["reachability"] > 0.3,
+            clause=outcome.violated_clause_id or None,
+            title=hypothesis_snapshot["description"][:200],
+        )
+        await ctx.emitter.thought(
+            agent="VALIDATOR",
+            hypothesis=hypothesis_snapshot["description"][:300],
+            evidence=[
+                outcome.crash_site or hypothesis_snapshot["location"],
+                f"reproduced {outcome.reproduction_count}x independently",
+                f"signal: {outcome.sanitizer_signal or 'nonzero exit'}",
+                f"violated clause: {outcome.violated_clause_id or 'none'}",
+                f"input hash: {outcome.input_hash[:16]}",
+            ],
+            decision=f"VALIDATED as {handle} — {outcome.detail[:200]}",
+            confidence=1.0,
+        )
+        validated.append(
+            {
+                "handle": handle,
+                "hypothesis": hypothesis_snapshot["handle"],
+                "location": outcome.crash_site or hypothesis_snapshot["location"],
+                "severity": outcome.severity,
+                "cwe": hypothesis_snapshot["cwe"],
+                "clause": outcome.violated_clause_id,
+                "pov_kind": outcome.pov_kind,
+                "reproduction_count": outcome.reproduction_count,
+            }
+        )
+        await _emit_metrics(ctx)
+
+    # Anything still queued was never reached. Say exactly why — the analysis profile's validation
+    # cap, an abort, or the wall clock — rather than leaving it QUEUED for the ledger to guess at.
+    async with session_scope() as db:
+        queue = HypothesisQueue(db, run_id=ctx.run_id, tenant_id=ctx.tenant_id)
+        remaining = [
+            row for row in await queue.all() if row.status == HypothesisStatus.QUEUED.value
+        ]
+        if remaining:
+            if ctx.abort_requested:
+                reason = "The run was aborted before this hypothesis was validated."
+            elif processed >= max_validations:
+                reason = (
+                    f"The {ctx.analysis_profile!r} analysis profile validates at most "
+                    f"{max_validations} hypotheses per run, and this one ranked below the cut. "
+                    "Re-run with a deeper profile to reach it."
+                )
+            else:
+                reason = (
+                    "The run's time or resource budget was reached before this hypothesis was "
+                    "validated."
+                )
+            for row in remaining:
+                await queue.transition(row, HypothesisStatus.UNKNOWN.value, reason)
+
+        ledger = await queue.ledger()
+        counts = await queue.counts()
+
+    state["validated"] = validated
+    state["downgraded"] = downgraded
+    state["ledger"] = ledger
+    state["hypotheses"] = [
+        *[
+            h
+            for h in state.get("hypotheses", [])
+            if h["handle"] not in {d["handle"] for d in downgraded}
+        ]
+    ]
+    state["phase"] = phase
+    await ctx.emitter.phase_done(
+        phase,
+        f"{len(validated)} validated · {len(downgraded)} refuted · "
+        f"{counts.get('UNKNOWN', 0)} unknown",
+    )
+    await _mark_phase(ctx, phase, "completed")
+    return state
+
+
+def finding_severity(outcome: Any, hypothesis: dict[str, Any]) -> str:
+    return outcome.severity or hypothesis.get("severity", "MEDIUM")
+
+
+# ---------------------------------------------------------------------------
+# 8. shield
+# ---------------------------------------------------------------------------
+async def node_shield(ctx: RunContext, state: KavachState) -> KavachState:
+    from app.shield.service import ShieldService
+
+    assert ctx.sandbox is not None and ctx.descriptor is not None and ctx.pinned is not None
+
+    phase = Phase.SHIELD.value
+    await _set_phase(ctx, phase)
+
+    if not ctx.findings:
+        await ctx.emitter.phase_start(phase, "no validated findings to shield")
+        await ctx.emitter.phase_done(phase, "skipped — nothing validated")
+        await _mark_phase(ctx, phase, "completed")
+        return state
+
+    await ctx.emitter.phase_start(phase, "synthesising reversible mitigations")
+    service = ShieldService(
+        sandbox=ctx.sandbox, descriptor=ctx.descriptor, workspace=ctx.pinned.work
+    )
+
+    shields: list[dict[str, Any]] = []
+    first_protection_ms: int | None = None
+
+    for index, (handle, work) in enumerate(sorted(ctx.findings.items()), start=1):
+        result = await service.deploy(
+            outcome=work.outcome,
+            handle=f"S{index:02d}",
+            benign_cases=ctx.benign_cases,
+            elapsed_ms=ctx.elapsed_ms(),
+        )
+        await _emit_tools(ctx, result.tool_events)
+        work.shield = result
+
+        if result.ok:
+            async with session_scope() as db:
+                db.add(
+                    Shield(
+                        tenant_id=ctx.tenant_id,
+                        run_id=ctx.run_id,
+                        finding_id=work.finding_id,
+                        handle=result.handle,
+                        mechanism=result.mechanism,
+                        rule=result.rule,
+                        rule_json=result.rule_json,
+                        deploy_command=result.deploy_command,
+                        revert_command=result.revert_command,
+                        verified_blocked=result.verified_blocked,
+                        verified_benign=result.verified_benign,
+                        benign_pass_count=result.benign_pass_count,
+                        benign_total=result.benign_total,
+                        deployed_at=datetime.now(UTC),
+                        evidence_refs=[f"ev:shield:{result.handle}"],
+                    )
+                )
+            if first_protection_ms is None:
+                first_protection_ms = result.time_to_protection_ms
+
+        await ctx.emitter.shield(
+            finding=handle,
+            shield_id=result.handle,
+            mechanism=result.mechanism,
+            verified_blocked=result.verified_blocked,
+            verified_benign=result.verified_benign,
+            deployed=result.deployed,
+            rule=result.rule,
+        )
+        await ctx.emitter.thought(
+            agent="SHIELD",
+            hypothesis=(
+                "A reversible filter can block the proven exploit before the root cause is repaired."
+            ),
+            evidence=[
+                f"rule: {result.rule[:160]}",
+                f"exploit blocked: {result.verified_blocked}",
+                f"benign corpus: {result.benign_pass_count}/{result.benign_total} pass",
+            ],
+            decision=result.detail[:240] or result.error[:240],
+            confidence=0.95 if result.ok else 0.4,
+        )
+        shields.append({"finding": handle, **result.as_dict()})
+
+    # The shield must not be active while the repair is verified, or the gauntlet would be
+    # testing the shield instead of the patch.
+    service.revert_all()
+    await ctx.emitter.log(
+        "Shields reverted in the verification workspace so the Refutation Gauntlet tests the "
+        "patch itself, not the mitigation.",
+        source="shield",
+    )
+
+    if first_protection_ms is not None:
+        await _update_run(ctx.run_id, time_to_protection_ms=first_protection_ms)
+
+    state["shields"] = shields
+    state["phase"] = phase
+    await _emit_metrics(ctx)
+    deployed = len([s for s in shields if s["deployed"]])
+    await ctx.emitter.phase_done(
+        phase,
+        f"{deployed}/{len(shields)} shields verified and deployed"
+        + (
+            f" · time to protection {first_protection_ms / 1000:.1f}s"
+            if first_protection_ms
+            else ""
+        ),
+    )
+    await _mark_phase(ctx, phase, "completed")
+    return state
+
+
+# ---------------------------------------------------------------------------
+# 9. root cause
+# ---------------------------------------------------------------------------
+async def node_root_cause(ctx: RunContext, state: KavachState) -> KavachState:
+    assert ctx.world_model is not None
+
+    phase = Phase.ROOT_CAUSE.value
+    await _set_phase(ctx, phase)
+
+    if not ctx.findings:
+        await ctx.emitter.phase_start(phase, "nothing to analyse")
+        await ctx.emitter.phase_done(phase, "skipped")
+        await _mark_phase(ctx, phase, "completed")
+        return state
+
+    await ctx.emitter.phase_start(phase, "locating root causes on the executed path")
+    samhita = ctx.samhita
+
+    for handle, work in sorted(ctx.findings.items()):
+        clause_description = ""
+        if work.clause:
+            clause_description = f"{work.clause['clause_id']}: {work.clause['description']}"
+
+        root = await rootcause.analyse(
+            provider=ctx.provider,
+            model=ctx.world_model,
+            outcome=work.outcome,
+            plan=work.plan,
+            clause_description=clause_description,
+        )
+        work.root_cause = root
+
+        async with session_scope() as db:
+            finding = await db.get(Finding, work.finding_id)
+            if finding is not None:
+                finding.root_cause_location = root.location[:400]
+                finding.root_cause_summary = root.summary
+                finding.root_cause_verified = root.verified
+                finding.root_cause_chain = root.causal_chain
+
+        await ctx.emitter.thought(
+            agent="ROOT CAUSE",
+            hypothesis=f"The defect is upstream of the crash site for {handle}.",
+            evidence=[
+                *root.display_chain(),
+                *root.verification_notes[:3],
+            ],
+            decision=(
+                f"Root cause {root.location} "
+                + (
+                    "verified on the execution path."
+                    if root.verified
+                    else "UNVERIFIED — using the deepest executed frame."
+                )
+            ),
+            confidence=root.confidence if root.verified else 0.4,
+        )
+
+        # -- blast radius --------------------------------------------------
+        radius = blast_radius.compute(
+            model=ctx.world_model,
+            samhita=samhita if samhita is not None else _empty_samhita(),
+            root_cause_location=root.location,
+            root_cause_function=root.function,
+        )
+        work.blast = radius
+
+        async with session_scope() as db:
+            finding = await db.get(Finding, work.finding_id)
+            if finding is not None:
+                finding.blast_radius_json = radius.as_dict()
+
+        await ctx.emitter.thought(
+            agent="BLAST RADIUS",
+            hypothesis="The regression scope bounds what the patch may touch and what must be re-verified.",
+            evidence=radius.chain(),
+            decision=(
+                f"Patch is confined to {', '.join(radius.allowed_paths) or 'no file'}; "
+                f"{len(radius.clause_ids)} clauses will be re-checked."
+            ),
+            confidence=1.0,
+        )
+
+    state["phase"] = phase
+    await _emit_metrics(ctx)
+    verified = len([w for w in ctx.findings.values() if w.root_cause and w.root_cause.verified])
+    await ctx.emitter.phase_done(
+        phase, f"{verified}/{len(ctx.findings)} root causes verified on the execution path"
+    )
+    await _mark_phase(ctx, phase, "completed")
+
+    phase = Phase.BLAST_RADIUS.value
+    await _mark_phase(ctx, phase, "completed")
+    await ctx.emitter.phase_start(phase, "computing regression scope")
+    await ctx.emitter.phase_done(
+        phase,
+        " · ".join(
+            f"{h}: {w.blast.regression_scope}" for h, w in sorted(ctx.findings.items()) if w.blast
+        )
+        or "no scope computed",
+    )
+    return state
+
+
+def _empty_samhita() -> Any:
+    from app.samhita.engine import SamhitaResult
+
+    return SamhitaResult()
+
+
+# ---------------------------------------------------------------------------
+# 10. patch + gauntlet iteration loop
+# ---------------------------------------------------------------------------
+async def node_patch_and_gauntlet(ctx: RunContext, state: KavachState) -> KavachState:
+    assert ctx.pinned is not None and ctx.sandbox is not None and ctx.descriptor is not None
+    assert ctx.world_model is not None
+
+    phase = Phase.PATCH.value
+    await _set_phase(ctx, phase)
+
+    if not ctx.findings:
+        await ctx.emitter.phase_start(phase, "nothing to repair")
+        await ctx.emitter.phase_done(phase, "skipped")
+        await _mark_phase(ctx, phase, "completed")
+        for skipped in (Phase.GAUNTLET.value,):
+            await _mark_phase(ctx, skipped, "completed")
+        return state
+
+    samhita = ctx.samhita if ctx.samhita is not None else _empty_samhita()
+    max_iterations = int(state.get("iter", {}).get("patch_limit", settings.max_patch_iterations))
+
+    async with session_scope() as db:
+        policy_row = await db.scalar(select(Policy).where(Policy.tenant_id == ctx.tenant_id))
+        policy_config = PolicyConfig.from_model(policy_row)
+
+    gauntlet = GauntletRunner(
+        sandbox=ctx.sandbox,
+        provider=ctx.provider,
+        descriptor=ctx.descriptor,
+        model=ctx.world_model,
+        samhita=samhita,
+        pinned=ctx.pinned,
+        workspace=ctx.pinned.work,
+        benign_cases=ctx.benign_cases,
+    )
+
+    # Baseline is captured from the unpatched tree, once.
+    reset_work(ctx.pinned)
+    ctx.baseline = await gauntlet.capture_baseline()
+
+    patches_state: list[dict[str, Any]] = []
+    gauntlet_state: dict[str, Any] = {}
+    all_gauntlets: list[dict[str, Any]] = []
+    first_repair_ms: int | None = None
+
+    for handle, work in sorted(ctx.findings.items()):
+        if await _check_abort(ctx):
+            break
+        if work.root_cause is None or work.blast is None:
+            continue
+
+        await ctx.emitter.phase_start(
+            Phase.PATCH.value, f"{handle}: synthesising repair for {work.root_cause.location}"
+        )
+
+        for iteration in range(1, max_iterations + 1):
+            work.iteration = iteration
+            state["iter"] = {**state.get("iter", {}), "patch": iteration}
+
+            reset_work(ctx.pinned)
+
+            payload = synthesis.build_payload(
+                model=ctx.world_model,
+                samhita=samhita,
+                root_cause=work.root_cause,
+                outcome=work.outcome,
+                pinned=ctx.pinned,
+                iteration=iteration,
+                constraints=work.constraints,
+                cwe=_cwe_for(work),
+            )
+            result = await synthesis.synthesise(
+                provider=ctx.provider, payload=payload, pinned=ctx.pinned
+            )
+
+            if not result.ok:
+                # No patch was produced, so there is nothing to record as a patch. Writing an
+                # empty PROPOSED/APPLY_FAILED row would put a zero-line "patch" in the history
+                # and in the certificate, implying an attempt that never reached the workspace.
+                # Record it on the finding as an unattempted repair instead.
+                work.repair_blocked_reason = result.error
+                async with session_scope() as db:
+                    finding = await db.get(Finding, work.finding_id)
+                    if finding is not None:
+                        finding.status_label = "SHIELDED (no repair synthesised)"
+                await ctx.emitter.log(
+                    f"{handle}: no repair could be synthesised — {result.error}",
+                    stream="stderr",
+                    source="patch",
+                )
+                await ctx.emitter.thought(
+                    agent="PATCH SYNTHESIS",
+                    hypothesis=f"A minimal repair exists for {handle}.",
+                    evidence=[
+                        work.root_cause.location,
+                        f"cwe: {_cwe_for(work) or 'unclassified'}",
+                        result.error[:200],
+                    ],
+                    decision=(
+                        "No repair was synthesised. The finding remains open with its shield as "
+                        "the only mitigation, and is recorded in REMAINING.md."
+                    ),
+                    confidence=0.0,
+                )
+                break
+
+            # -- policy gate (pre-application) -----------------------------
+            decision = evaluate_policy(
+                diff=result.unified_diff,
+                file_changes=result.file_changes,
+                config=policy_config,
+                blast=work.blast,
+                assurance_level=None,
+                # The certificate does not exist yet; the certificate checks run again at publish.
+                has_certificate=None,
+            )
+            certificate_codes = {
+                "MISSING_CERTIFICATE",
+                "ASSURANCE_LEVEL_R",
+                "ASSURANCE_BELOW_FLOOR",
+            }
+            blocking = [v for v in decision.violations if v.code not in certificate_codes]
+
+            within_radius = not any(v.code == "OUTSIDE_BLAST_RADIUS" for v in decision.violations)
+
+            await ctx.emitter.thought(
+                agent="POLICY GATE",
+                hypothesis="A patch must be inside the verified scope and change nothing forbidden.",
+                evidence=[
+                    f"checks: {', '.join(decision.checks_run)}",
+                    f"files: {', '.join(result.files)}",
+                    f"diff: +{result.stats.lines_added}/-{result.stats.lines_removed}",
+                    f"allowed paths: {', '.join(work.blast.allowed_paths)}",
+                ],
+                decision=(
+                    "PASS" if not blocking else f"REJECTED — {'; '.join(v.code for v in blocking)}"
+                ),
+                confidence=1.0,
+            )
+
+            if blocking:
+                patch_row = await _record_patch(
+                    ctx,
+                    work,
+                    result,
+                    iteration=iteration,
+                    status=PatchStatus.POLICY_REJECTED.value,
+                    policy_violations=[v.as_dict() for v in blocking],
+                    within_radius=within_radius,
+                    refutation_summary=decision.summary,
+                )
+                patches_state.append(patch_row)
+                work.constraints.append(
+                    f"POLICY REJECTED: {decision.summary}. The next patch must satisfy the "
+                    "deterministic publish policy."
+                )
+                await ctx.emitter.phase_blocked(
+                    Phase.PATCH.value, f"{handle} v{iteration}: {decision.summary[:200]}"
+                )
+                continue
+
+            applied, apply_error = synthesis.apply_to_workspace(result, ctx.pinned)
+            if not applied:
+                await _record_patch(
+                    ctx,
+                    work,
+                    result,
+                    iteration=iteration,
+                    status=PatchStatus.APPLY_FAILED.value,
+                    policy_violations=[],
+                    within_radius=within_radius,
+                    refutation_summary=apply_error,
+                )
+                await ctx.emitter.log(
+                    f"{handle}: patch v{iteration} could not be applied — {apply_error}",
+                    stream="stderr",
+                    source="patch",
+                )
+                break
+
+            patch_row = await _record_patch(
+                ctx,
+                work,
+                result,
+                iteration=iteration,
+                status=PatchStatus.APPLIED.value,
+                policy_violations=[],
+                within_radius=within_radius,
+            )
+            work.patches.append(result)
+
+            for path in result.files:
+                await ctx.emitter.diff(
+                    finding=handle,
+                    file=path,
+                    patch=result.unified_diff,
+                    iteration=iteration,
+                    patch_id=str(patch_row["id"]),
+                )
+
+            # -- gauntlet --------------------------------------------------
+            await _set_phase(ctx, Phase.GAUNTLET.value)
+            await ctx.emitter.phase_start(
+                Phase.GAUNTLET.value, f"{handle}: attacking patch v{iteration}"
+            )
+
+            # `handle` is bound as a default rather than captured: the callback is defined inside
+            # the per-finding loop, and a late-bound closure would attribute stage events to
+            # whichever finding the loop happened to be on when the callback fired.
+            async def on_stage(
+                *,
+                stage: str,
+                verdict: str,
+                detail: str,
+                iteration: int,
+                _finding: str = handle,
+            ) -> None:
+                await ctx.emitter.gauntlet(
+                    finding=_finding,
+                    stage=stage,
+                    verdict=verdict,
+                    detail=detail[:400],
+                    iteration=iteration,
+                )
+
+            outcome = await gauntlet.run(
+                outcome=work.outcome,
+                synthesis=result,
+                blast=work.blast,
+                iteration=iteration,
+                finding_handle=handle,
+                on_stage=on_stage,
+            )
+            work.gauntlets.append(outcome)
+
+            gauntlet_dict = await _record_gauntlet(
+                ctx, work, outcome, patch_id=patch_row["id"], iteration=iteration
+            )
+            all_gauntlets.append(gauntlet_dict)
+            gauntlet_state[f"{handle}:v{iteration}"] = outcome.as_dict()
+
+            recheck = outcome.stage(GauntletStage.SAMHITA_RECHECK.value)
+            work.coverage_after = float(
+                (recheck.metrics or {}).get("coverage_percent", work.coverage_before)
+                if recheck
+                else work.coverage_before
+            )
+
+            if outcome.passed:
+                work.verified_patch = patch_row
+                work.verified_synthesis = result
+                work.exploit_eliminated = True
+                async with session_scope() as db:
+                    row = await db.get(Patch, uuid.UUID(str(patch_row["id"])))
+                    if row is not None:
+                        row.status = PatchStatus.VERIFIED.value
+                        row.verified_at = datetime.now(UTC)
+                patch_row["status"] = PatchStatus.VERIFIED.value
+                patches_state.append(patch_row)
+                if first_repair_ms is None:
+                    first_repair_ms = ctx.elapsed_ms()
+                await ctx.emitter.phase_done(
+                    Phase.GAUNTLET.value, f"{handle} v{iteration}: {outcome.summary}"
+                )
+                break
+
+            # -- refuted ---------------------------------------------------
+            async with session_scope() as db:
+                row = await db.get(Patch, uuid.UUID(str(patch_row["id"])))
+                if row is not None:
+                    row.status = PatchStatus.REFUTED.value
+                    row.withdrawn_at = datetime.now(UTC)
+                    row.refutation_summary = outcome.summary
+                    row.constraints = list(outcome.constraints)
+            patch_row["status"] = PatchStatus.REFUTED.value
+            patch_row["refutation_summary"] = outcome.summary
+            patch_row["constraints"] = list(outcome.constraints)
+            patches_state.append(patch_row)
+
+            work.constraints.extend(outcome.constraints)
+            await ctx.emitter.thought(
+                agent="REFUTATION GAUNTLET",
+                hypothesis=f"Patch v{iteration} for {handle} eliminates the vulnerability.",
+                evidence=[
+                    f"{s.stage}: {s.verdict.upper()} — {s.detail[:120]}" for s in outcome.stages
+                ],
+                decision=(
+                    f"REFUTED at {outcome.failing_stage}. Patch withdrawn. "
+                    f"{len(outcome.constraints)} constraint(s) added for iteration {iteration + 1}."
+                    if iteration < max_iterations
+                    else f"REFUTED at {outcome.failing_stage}. Iteration limit reached — honest failure."
+                ),
+                confidence=1.0,
+            )
+            await ctx.emitter.phase_failed(
+                Phase.GAUNTLET.value, f"{handle} v{iteration}: {outcome.summary[:240]}"
+            )
+
+            if iteration >= max_iterations:
+                await ctx.emitter.log(
+                    f"{handle}: HONEST FAILURE — {max_iterations} patch iterations exhausted. "
+                    "The shield remains the only mitigation.",
+                    stream="stderr",
+                    source="patch",
+                )
+
+        reset_work(ctx.pinned)
+
+    if first_repair_ms is not None:
+        await _update_run(ctx.run_id, time_to_repair_ms=first_repair_ms)
+
+    state["patches"] = patches_state
+    state["gauntlet"] = gauntlet_state
+    state["phase"] = Phase.GAUNTLET.value
+    await _emit_metrics(ctx)
+
+    verified = len([w for w in ctx.findings.values() if w.verified_patch])
+    await _mark_phase(ctx, Phase.PATCH.value, "completed")
+    await _mark_phase(ctx, Phase.GAUNTLET.value, "completed" if verified else "failed")
+    await ctx.emitter.phase_done(
+        Phase.PATCH.value,
+        f"{verified}/{len(ctx.findings)} findings repaired and verified",
+    )
+    return state
+
+
+def _cwe_for(work: FindingWork) -> str:
+    if work.plan.get("kind") == "command_injection":
+        return "CWE-78"
+    if work.plan.get("kind") == "length_boundary":
+        return "CWE-1284"
+    if work.plan.get("kind") == "path_traversal":
+        return "CWE-22"
+    outcome_kind = getattr(work.outcome, "pov_kind", "")
+    return {
+        "command_injection": "CWE-78",
+        "length_boundary": "CWE-1284",
+        "path_traversal": "CWE-22",
+    }.get(outcome_kind, "")
+
+
+async def _record_patch(
+    ctx: RunContext,
+    work: FindingWork,
+    result: Any,
+    *,
+    iteration: int,
+    status: str,
+    policy_violations: list[dict[str, Any]],
+    within_radius: bool,
+    refutation_summary: str = "",
+) -> dict[str, Any]:
+    async with session_scope() as db:
+        patch = Patch(
+            tenant_id=ctx.tenant_id,
+            run_id=ctx.run_id,
+            finding_id=work.finding_id,
+            iteration=iteration,
+            status=status,
+            reason=result.reason,
+            unified_diff=result.unified_diff,
+            files=result.files,
+            file_contents={
+                path: {"old": old, "new": new} for path, (old, new) in result.file_changes.items()
+            },
+            risk=result.risk,
+            expected_effect=result.expected_effect,
+            diff_hash=result.diff_hash,
+            lines_added=result.stats.lines_added,
+            lines_removed=result.stats.lines_removed,
+            applied=status == PatchStatus.APPLIED.value,
+            apply_error="" if status != PatchStatus.APPLY_FAILED.value else refutation_summary,
+            policy_passed=not policy_violations,
+            policy_violations=policy_violations,
+            within_blast_radius=within_radius,
+            blast_radius_json=work.blast.as_dict() if work.blast else {},
+            constraints=list(work.constraints),
+            refutation_summary=refutation_summary,
+            proposed_by_model=result.model_name,
+            evidence_refs=[f"ev:patch:{work.handle}:v{iteration}"],
+        )
+        db.add(patch)
+        await db.flush()
+        return {
+            "id": str(patch.id),
+            "finding_handle": work.handle,
+            "iteration": iteration,
+            "status": status,
+            "reason": patch.reason,
+            "unified_diff": patch.unified_diff,
+            "files": patch.files,
+            "risk": patch.risk,
+            "expected_effect": patch.expected_effect,
+            "diff_hash": patch.diff_hash,
+            "lines_added": patch.lines_added,
+            "lines_removed": patch.lines_removed,
+            "policy_passed": patch.policy_passed,
+            "policy_violations": policy_violations,
+            "within_blast_radius": within_radius,
+            "constraints": list(work.constraints),
+            "refutation_summary": refutation_summary,
+        }
+
+
+async def _record_gauntlet(
+    ctx: RunContext, work: FindingWork, outcome: Any, *, patch_id: str, iteration: int
+) -> dict[str, Any]:
+    async with session_scope() as db:
+        row = GauntletRun(
+            tenant_id=ctx.tenant_id,
+            run_id=ctx.run_id,
+            finding_id=work.finding_id,
+            patch_id=uuid.UUID(str(patch_id)),
+            iteration=iteration,
+            verdict=outcome.verdict,
+            stages_passed=outcome.stages_passed,
+            stages_total=outcome.stages_total,
+            started_at=datetime.now(UTC),
+            finished_at=datetime.now(UTC),
+            duration_ms=outcome.duration_ms,
+            failing_stage=outcome.failing_stage,
+            summary=outcome.summary,
+        )
+        db.add(row)
+        await db.flush()
+        for stage in outcome.stages:
+            db.add(
+                GauntletResult(
+                    tenant_id=ctx.tenant_id,
+                    run_id=ctx.run_id,
+                    gauntlet_run_id=row.id,
+                    stage=stage.stage,
+                    verdict=stage.verdict,
+                    detail=stage.detail,
+                    refuting_evidence=stage.refuting_evidence,
+                    metrics={
+                        k: v for k, v in (stage.metrics or {}).items() if not k.startswith("_")
+                    },
+                    duration_ms=stage.duration_ms,
+                    cases_total=stage.cases_total,
+                    cases_passed=stage.cases_passed,
+                    evidence_refs=[f"ev:gauntlet:{work.handle}:v{iteration}:{stage.stage}"],
+                )
+            )
+    return {
+        "finding_handle": work.handle,
+        "iteration": iteration,
+        "verdict": outcome.verdict,
+        "failing_stage": outcome.failing_stage,
+        "summary": outcome.summary,
+        "stages": [s.as_dict() for s in outcome.stages],
+    }
+
+
+# ---------------------------------------------------------------------------
+# 11. PRAMAAN
+# ---------------------------------------------------------------------------
+async def node_attest(ctx: RunContext, state: KavachState) -> KavachState:
+    phase = Phase.PRAMAAN.value
+    await _set_phase(ctx, phase)
+    await ctx.emitter.phase_start(phase, "building evidence graphs and grading assurance")
+
+    rows = await _run_row(ctx.run_id)
+    run_info = rows.get("run", {})
+    repository_info = rows.get("repository", {})
+    samhita = ctx.samhita if ctx.samhita is not None else _empty_samhita()
+    sandbox_stats = ctx.sandbox_stats()
+    world_hash = ctx.world_model.content_hash() if ctx.world_model else ""
+
+    certificates: list[dict[str, Any]] = []
+    changes_entries: list[dict[str, Any]] = []
+
+    for handle, work in sorted(ctx.findings.items()):
+        latest_gauntlet = work.gauntlets[-1] if work.gauntlets else None
+        sibling_stage = (
+            latest_gauntlet.stage(GauntletStage.SIBLING_HUNT.value) if latest_gauntlet else None
+        )
+        recheck_stage = (
+            latest_gauntlet.stage(GauntletStage.SAMHITA_RECHECK.value) if latest_gauntlet else None
+        )
+        unproved = (
+            list((sibling_stage.metrics or {}).get("unproved_candidates", []))
+            if sibling_stage
+            else []
+        )
+
+        # Coverage before and after must be measured over the *same* workload, or the delta is
+        # meaningless. The pre-patch figure is SAMHITA's observation coverage over the benign
+        # corpus; the post-patch figure is the re-check over that same corpus. Using the
+        # single-case proof-of-vulnerability observation as the baseline would compare one request
+        # against twelve and report a large "behavioural change" that never happened.
+        coverage_before = samhita.coverage_percent or work.coverage_before
+        coverage_after = work.coverage_after or coverage_before
+
+        assessment = assurance_mod.grade(
+            gauntlet=latest_gauntlet or _null_gauntlet(),
+            exploit_eliminated=work.exploit_eliminated,
+            shield_active=bool(work.shield and work.shield.ok),
+            coverage_before=coverage_before,
+            coverage_after=coverage_after,
+            clause_total=int((recheck_stage.metrics or {}).get("clauses_checked", 0))
+            if recheck_stage
+            else 0,
+            clause_held=int((recheck_stage.metrics or {}).get("clauses_held", 0))
+            if recheck_stage
+            else 0,
+            clause_unsupported=int((recheck_stage.metrics or {}).get("clauses_unsupported", 0))
+            if recheck_stage
+            else 0,
+            unproved_siblings=unproved,
+            iteration=work.iteration,
+            max_iterations=int(state.get("iter", {}).get("patch_limit", 3)),
+        )
+        work.assurance = assessment
+
+        finding_payload = await _finding_payload(work)
+        patch_payloads = [p for p in state.get("patches", []) if p.get("finding_handle") == handle]
+        gauntlet_payloads = [
+            g.as_dict() | {"iteration": g_index + 1} for g_index, g in enumerate(work.gauntlets)
+        ]
+
+        graph = certificate_mod.build_graph(
+            finding=finding_payload,
+            channels=work.channels,
+            clause=work.clause,
+            shield=work.shield.as_dict() if work.shield else None,
+            patches=patch_payloads,
+            gauntlets=gauntlet_payloads,
+            blast=work.blast.as_dict() if work.blast else {},
+            world_model_hash=world_hash,
+            sandbox_stats=sandbox_stats,
+            runtime_digest=(
+                work.outcome.evidence.get("pov_observation_hash", "") if work.outcome else ""
+            ),
+        )
+
+        certificate = certificate_mod.build_certificate(
+            run=run_info,
+            repository=repository_info,
+            finding=finding_payload,
+            assurance=assessment,
+            graph=graph,
+            clause=work.clause,
+            shield=work.shield.as_dict() if work.shield else None,
+            patches=patch_payloads,
+            gauntlets=gauntlet_payloads,
+            blast=work.blast.as_dict() if work.blast else {},
+            samhita_stats=samhita.stats,
+            sandbox_stats=sandbox_stats,
+            provider_info=ctx.provider_info(),
+        )
+
+        if not certificate.ok:
+            await ctx.emitter.log(
+                f"{handle}: certificate refused — {certificate.error}",
+                stream="stderr",
+                source="pramaan",
+            )
+            continue
+
+        work.certificate = certificate
+
+        async with session_scope() as db:
+            row = Certificate(
+                tenant_id=ctx.tenant_id,
+                run_id=ctx.run_id,
+                finding_id=work.finding_id,
+                patch_id=uuid.UUID(str(work.verified_patch["id"])) if work.verified_patch else None,
+                serial=certificate.serial,
+                assurance_level=assessment.level,
+                grading_rationale=assessment.rationale,
+                limitations=assessment.limitations,
+                document=certificate.document,
+                certificate_hash=certificate.certificate_hash,
+                signature=certificate.signature,
+                evidence_node_count=len(graph.nodes),
+                evidence_edge_count=len(graph.edges),
+                generation_ms=certificate.generation_ms,
+                issued_at=datetime.now(UTC),
+            )
+            db.add(row)
+            await db.flush()
+            certificate_id = str(row.id)
+
+            # Several nodes are legitimately shared between findings in the same run — the
+            # discovery channels, the world model, the sandbox session. Their refs are stable by
+            # design (that is what makes the graph a graph rather than N disjoint trees), so the
+            # second finding's certificate must reuse them rather than re-insert them.
+            existing_nodes = set(
+                (
+                    await db.scalars(
+                        select(EvidenceNode.ref).where(EvidenceNode.run_id == ctx.run_id)
+                    )
+                ).all()
+            )
+            existing_edges = {
+                (source, relation, target)
+                for source, relation, target in (
+                    await db.execute(
+                        select(
+                            EvidenceEdge.source_ref,
+                            EvidenceEdge.relation,
+                            EvidenceEdge.target_ref,
+                        ).where(EvidenceEdge.run_id == ctx.run_id)
+                    )
+                ).all()
+            }
+
+            for node in graph.nodes:
+                if node.ref in existing_nodes:
+                    continue
+                existing_nodes.add(node.ref)
+                db.add(
+                    EvidenceNode(
+                        tenant_id=ctx.tenant_id,
+                        run_id=ctx.run_id,
+                        ref=node.ref,
+                        type=node.type,
+                        title=node.title,
+                        content=node.content[:100000],
+                        content_hash=node.content_hash,
+                        meta_json=node.meta,
+                        produced_by=node.produced_by,
+                    )
+                )
+            for edge in graph.edges:
+                key = (edge.source_ref, edge.relation, edge.target_ref)
+                if key in existing_edges:
+                    continue
+                existing_edges.add(key)
+                db.add(
+                    EvidenceEdge(
+                        tenant_id=ctx.tenant_id,
+                        run_id=ctx.run_id,
+                        source_ref=edge.source_ref,
+                        relation=edge.relation,
+                        target_ref=edge.target_ref,
+                        meta_json=edge.meta,
+                    )
+                )
+
+            finding = await db.get(Finding, work.finding_id)
+            if finding is not None:
+                finding.status_label = (
+                    f"REPAIRED (Level {assessment.level})"
+                    if assessment.level != AssuranceLevel.R.value
+                    else "SHIELDED (patch refuted)"
+                )
+
+        await ctx.emitter.certificate(
+            finding=handle,
+            level=assessment.level,
+            certificate_hash=certificate.certificate_hash,
+            certificate_id=certificate_id,
+        )
+        await ctx.emitter.thought(
+            agent="PRAMAAN",
+            hypothesis="Every claim in a certificate must point at stored evidence.",
+            evidence=[
+                f"evidence nodes: {len(graph.nodes)}",
+                f"evidence edges: {len(graph.edges)}",
+                f"dangling claims: {len(graph.unsupported_claims())}",
+                f"certificate hash: {certificate.certificate_hash[:16]}",
+            ],
+            decision=f"Level {assessment.level} — {assessment.rationale[0] if assessment.rationale else ''}",
+            confidence=1.0,
+        )
+
+        certificate_json = json.dumps(certificate.document, indent=2, sort_keys=True, default=str)
+        await _store_artifact(
+            ctx,
+            kind="certificate",
+            name=f"certificate-{handle}.json",
+            content=certificate_json,
+            media_type="application/json",
+            meta={
+                "finding": handle,
+                "level": assessment.level,
+                "certificate_hash": certificate.certificate_hash,
+                "certificate_id": certificate_id,
+            },
+        )
+
+        certificates.append(
+            {
+                "id": certificate_id,
+                "finding_handle": handle,
+                "serial": certificate.serial,
+                "assurance_level": assessment.level,
+                "certificate_hash": certificate.certificate_hash,
+                "limitations": assessment.limitations,
+                "rationale": assessment.rationale,
+            }
+        )
+        changes_entries.append(
+            {
+                "finding": finding_payload,
+                "patch": work.verified_patch,
+                "certificate": {
+                    "assurance_level": assessment.level,
+                    "certificate_hash": certificate.certificate_hash,
+                },
+                "clause": work.clause,
+                "blast_radius": work.blast.as_dict() if work.blast else {},
+                "gauntlet": {
+                    "stages": certificate.document.get("verification", {}).get("stages", {})
+                },
+            }
+        )
+
+    # -- deliverable documents --------------------------------------------
+    async with session_scope() as db:
+        queue = HypothesisQueue(db, run_id=ctx.run_id, tenant_id=ctx.tenant_id)
+        ledger = await queue.ledger()
+
+    verified_entries = [
+        e for e in changes_entries if e["certificate"]["assurance_level"] != AssuranceLevel.R.value
+    ]
+    changes_md = docs_mod.render_changes(
+        run=run_info, repository=repository_info, entries=verified_entries
+    )
+
+    remaining_inputs = docs_mod.build_remaining_inputs(
+        ledger=ledger,
+        patches=state.get("patches", []),
+        gauntlets=[
+            {**g, "finding_handle": g.get("finding_handle", "")} for g in _all_gauntlet_dicts(ctx)
+        ],
+        clauses=state.get("samhita", []),
+        channel_results=[
+            *[r.as_dict() | {"coverage_notes": r.coverage_notes} for r in ctx.channel_results],
+            *(
+                [
+                    {
+                        "channel": "fuzzing + runtime",
+                        "coverage_notes": [
+                            "NOT RUN. "
+                            + str(state.get("static_only_reason", "the target cannot be executed"))
+                            + ". Both channels require an executable entrypoint, so this run has "
+                            "zero dynamic coverage — no crash was searched for and no behaviour "
+                            "was observed.",
+                        ],
+                    }
+                ]
+                if ctx.static_only
+                else []
+            ),
+        ],
+        coverage_percent=samhita.coverage_percent,
+        covered_statements=(
+            samhita.observation_set.covered_statements if samhita.observation_set else 0
+        ),
+        total_statements=(
+            samhita.observation_set.total_statements if samhita.observation_set else 0
+        ),
+        certificates=certificates,
+        world_model_summary=state.get("world", {}),
+        sandbox_stats=sandbox_stats,
+    )
+    remaining_md = docs_mod.render_remaining(
+        run=run_info, repository=repository_info, **remaining_inputs
+    )
+
+    await _store_artifact(ctx, kind="changes_md", name="CHANGES.md", content=changes_md)
+    await _store_artifact(ctx, kind="remaining_md", name="REMAINING.md", content=remaining_md)
+
+    state["certificates"] = certificates
+    state["pramaan"] = {
+        "certificates": len(certificates),
+        "levels": {c["assurance_level"]: 1 for c in certificates},
+        "changes_md_hash": sha256_text(changes_md),
+        "remaining_md_hash": sha256_text(remaining_md),
+    }
+    state["ledger"] = ledger
+    state["phase"] = phase
+    await _emit_metrics(ctx)
+    await ctx.emitter.phase_done(
+        phase,
+        f"{len(certificates)} certificate(s): "
+        + (
+            ", ".join(f"{c['finding_handle']}=Level {c['assurance_level']}" for c in certificates)
+            or "none"
+        ),
+    )
+    await _mark_phase(ctx, phase, "completed")
+    return state
+
+
+def _all_gauntlet_dicts(ctx: RunContext) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for handle, work in ctx.findings.items():
+        for index, gauntlet in enumerate(work.gauntlets, start=1):
+            out.append({**gauntlet.as_dict(), "iteration": index, "finding_handle": handle})
+    return out
+
+
+def _null_gauntlet() -> Any:
+    from app.gauntlet.runner import GauntletOutcome
+
+    return GauntletOutcome()
+
+
+async def _finding_payload(work: FindingWork) -> dict[str, Any]:
+    async with session_scope() as db:
+        finding = await db.get(Finding, work.finding_id)
+        if finding is None:
+            return {"handle": work.handle, "title": "", "state": "", "severity": ""}
+        return {
+            "handle": finding.handle,
+            "title": finding.title,
+            "state": finding.state,
+            "severity": finding.severity,
+            "cwe": finding.cwe,
+            "location": finding.location,
+            "reachable": finding.reachable,
+            "source_channel": finding.source_channel,
+            "root_cause_location": finding.root_cause_location,
+            "root_cause_summary": finding.root_cause_summary,
+            "root_cause_verified": finding.root_cause_verified,
+            "root_cause_chain": finding.root_cause_chain,
+            "reproduced": finding.reproduced,
+            "reproduction_count": finding.reproduction_count,
+            "exit_code": finding.exit_code,
+            "sanitizer_signal": finding.sanitizer_signal,
+            "contract_violation": finding.contract_violation,
+            "input_hash": finding.input_hash,
+            "output_hash": finding.output_hash,
+            "trace_hash": finding.trace_hash,
+            "pov_hash": finding.pov_hash,
+            "pov_kind": finding.pov_kind,
+            "coverage_percent": finding.coverage_percent,
+        }
+
+
+# ---------------------------------------------------------------------------
+# 12. publish gate
+# ---------------------------------------------------------------------------
+async def node_publish_gate(ctx: RunContext, state: KavachState) -> KavachState:
+    phase = Phase.PUBLISH.value
+    await _set_phase(ctx, phase)
+    await ctx.emitter.phase_start(phase, "evaluating the publish gate")
+
+    publishable = [
+        c for c in state.get("certificates", []) if c["assurance_level"] != AssuranceLevel.R.value
+    ]
+
+    # Publishing needs a credential, and a credential only exists for a GitHub App installation.
+    # Blocking here — rather than when a reviewer clicks Approve — means the console tells the truth
+    # about what this run can produce from the moment it finishes.
+    provider_publishable = bool(state.get("target", {}).get("publishable", False))
+    if publishable and not provider_publishable:
+        await ctx.emitter.thought(
+            agent="PUBLISH GATE",
+            hypothesis="A verified patch is ready to become a pull request.",
+            evidence=[
+                f"{len(publishable)} certificate(s) above Level R",
+                f"provider: {state.get('target', {}).get('provider', 'unknown')}",
+                "no GitHub App installation is linked to this repository",
+            ],
+            decision=(
+                "Publishing is unavailable for this repository. KavachX holds no credential for "
+                "it, so the Publisher cannot act. The patch and its certificate are available as "
+                "run artifacts for a human to apply."
+            ),
+            confidence=1.0,
+        )
+        await ctx.emitter.phase_blocked(
+            phase,
+            "this repository is analysis-only — publishing requires a GitHub App installation",
+        )
+        await _mark_phase(ctx, phase, "blocked")
+        await ctx.emitter.status(
+            RunStatus.COMPLETED.value,
+            f"{len(publishable)} verified patch(es); publishing unavailable for a "
+            f"{state.get('target', {}).get('provider', 'non-installed')} repository",
+        )
+        await _update_run(ctx.run_id, status=RunStatus.COMPLETED.value)
+        state["status"] = RunStatus.COMPLETED.value
+        return state
+
+    if not publishable:
+        await ctx.emitter.phase_blocked(
+            phase,
+            "no publishable certificate: nothing reached an assurance level above R",
+        )
+        await _mark_phase(ctx, phase, "blocked")
+        await _update_run(ctx.run_id, status=RunStatus.COMPLETED.value)
+        state["status"] = RunStatus.COMPLETED.value
+        return state
+
+    # Human approval is a policy decision, and the default is to require it. The run parks in
+    # AWAITING_APPROVAL and the Publisher is invoked from the API once a human with
+    # patch:publish approves.
+    async with session_scope() as db:
+        policy_row = await db.scalar(select(Policy).where(Policy.tenant_id == ctx.tenant_id))
+        require_approval = policy_row.require_human_approval if policy_row else True
+
+    if require_approval:
+        await _update_run(ctx.run_id, status=RunStatus.AWAITING_APPROVAL.value)
+        state["status"] = RunStatus.AWAITING_APPROVAL.value
+        await ctx.emitter.thought(
+            agent="PUBLISH GATE",
+            hypothesis="A verified patch is ready to become a pull request.",
+            evidence=[
+                f"{len(publishable)} certificate(s) above Level R",
+                *[f"{c['finding_handle']}: Level {c['assurance_level']}" for c in publishable],
+                "policy: human approval required",
+            ],
+            decision=(
+                "Held for human approval. The Publisher — the only component with GitHub "
+                "credentials — is not invoked until a reviewer with patch:publish approves."
+            ),
+            confidence=1.0,
+        )
+        await ctx.emitter.status(
+            RunStatus.AWAITING_APPROVAL.value,
+            f"{len(publishable)} verified patch(es) awaiting human publish approval",
+        )
+        await ctx.emitter.phase_blocked(phase, "awaiting human approval")
+        await _mark_phase(ctx, phase, "blocked")
+        return state
+
+    await _update_run(ctx.run_id, status=RunStatus.COMPLETED.value)
+    state["status"] = RunStatus.COMPLETED.value
+    await ctx.emitter.phase_done(phase, "publish permitted without human approval by policy")
+    await _mark_phase(ctx, phase, "completed")
+    return state
