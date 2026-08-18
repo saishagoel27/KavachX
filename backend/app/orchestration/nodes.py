@@ -1090,6 +1090,10 @@ async def node_validate(ctx: RunContext, state: KavachState) -> KavachState:
         f"{len(validated)} validated · {len(downgraded)} refuted · "
         f"{counts.get('UNKNOWN', 0)} unknown",
     )
+    await ctx.emitter.log(
+        f"Red Team: Validation complete. Promoting {len(validated)} validated vulnerability findings to Blue Team for patching.",
+        source="red-team",
+    )
     await _mark_phase(ctx, phase, "completed")
     return state
 
@@ -1365,6 +1369,11 @@ async def node_patch_and_gauntlet(ctx: RunContext, state: KavachState) -> Kavach
     all_gauntlets: list[dict[str, Any]] = []
     first_repair_ms: int | None = None
 
+    await ctx.emitter.log(
+        f"Blue Team: Starting repair synthesis for {len(ctx.findings)} validated findings.",
+        source="blue-team",
+    )
+
     for handle, work in sorted(ctx.findings.items()):
         if await _check_abort(ctx):
             break
@@ -1378,6 +1387,11 @@ async def node_patch_and_gauntlet(ctx: RunContext, state: KavachState) -> Kavach
         for iteration in range(1, max_iterations + 1):
             work.iteration = iteration
             state["iter"] = {**state.get("iter", {}), "patch": iteration}
+
+            await ctx.emitter.log(
+                f"Blue Team: Synthesising patch candidate (iteration {iteration}/{max_iterations}) for finding {handle}...",
+                source="blue-team",
+            )
 
             reset_work(ctx.pinned)
 
@@ -1510,6 +1524,10 @@ async def node_patch_and_gauntlet(ctx: RunContext, state: KavachState) -> Kavach
                 within_radius=within_radius,
             )
             work.patches.append(result)
+            await ctx.emitter.log(
+                f"Blue Team: Synthesised patch candidate v{iteration} for finding {handle}. Handoff to Red Team for adversarial validation.",
+                source="blue-team",
+            )
 
             for path in result.files:
                 await ctx.emitter.diff(
@@ -1524,6 +1542,10 @@ async def node_patch_and_gauntlet(ctx: RunContext, state: KavachState) -> Kavach
             await _set_phase(ctx, Phase.GAUNTLET.value)
             await ctx.emitter.phase_start(
                 Phase.GAUNTLET.value, f"{handle}: attacking patch v{iteration}"
+            )
+            await ctx.emitter.log(
+                f"Red Team: Launching adversarial gauntlet (4 stages of mutation & replay) against patch v{iteration} for finding {handle}.",
+                source="red-team",
             )
 
             # `handle` is bound as a default rather than captured: the callback is defined inside
@@ -1544,6 +1566,23 @@ async def node_patch_and_gauntlet(ctx: RunContext, state: KavachState) -> Kavach
                     detail=detail[:400],
                     iteration=iteration,
                 )
+                stage_label = {
+                    "exploit_mutation": "Exploit Mutation",
+                    "sibling_hunt": "Sibling Hunt",
+                    "differential_replay": "Differential Replay",
+                    "samhita_recheck": "SAMHITA Re-check",
+                }.get(stage, stage)
+                if verdict == "pass":
+                    await ctx.emitter.log(
+                        f"Red Team: Stage [{stage_label}] passed — patch successfully blocked/prevented the attack.",
+                        source="red-team",
+                    )
+                elif verdict == "fail":
+                    await ctx.emitter.log(
+                        f"Red Team: Stage [{stage_label}] failed — exploit refuted the patch: {detail[:200]}",
+                        stream="stderr",
+                        source="red-team",
+                    )
 
             outcome = await gauntlet.run(
                 outcome=work.outcome,
@@ -1581,6 +1620,10 @@ async def node_patch_and_gauntlet(ctx: RunContext, state: KavachState) -> Kavach
                 patches_state.append(patch_row)
                 if first_repair_ms is None:
                     first_repair_ms = ctx.elapsed_ms()
+                await ctx.emitter.log(
+                    f"Blue Team: Verification successful. Patch v{iteration} for finding {handle} has passed all gauntlet refutations.",
+                    source="blue-team",
+                )
                 await ctx.emitter.phase_done(
                     Phase.GAUNTLET.value, f"{handle} v{iteration}: {outcome.summary}"
                 )
@@ -1598,6 +1641,11 @@ async def node_patch_and_gauntlet(ctx: RunContext, state: KavachState) -> Kavach
             patch_row["refutation_summary"] = outcome.summary
             patch_row["constraints"] = list(outcome.constraints)
             patches_state.append(patch_row)
+            await ctx.emitter.log(
+                f"Red Team: Patch v{iteration} for finding {handle} was refuted: {outcome.summary}",
+                stream="stderr",
+                source="red-team",
+            )
 
             work.constraints.extend(outcome.constraints)
             await ctx.emitter.thought(

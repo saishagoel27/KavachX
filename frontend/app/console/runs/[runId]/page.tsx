@@ -18,6 +18,7 @@ import {
   ReasoningTrace,
   ResourceMeter,
   ShieldPanel,
+  SecurityMissionPanel,
 } from "@/components/run-panels";
 import {
   Chip,
@@ -177,6 +178,7 @@ export default function RunConsolePage() {
 
   const tabs = [
     { id: "live", label: "Live" },
+    { id: "mission", label: "Security Mission" },
     { id: "findings", label: "Findings", count: findings.length },
     { id: "contract", label: "SAMHITA", count: clauses.filter((c) => c.status === "SURVIVING").length },
     { id: "patches", label: "Patches", count: patches.length },
@@ -354,6 +356,18 @@ export default function RunConsolePage() {
             <LogPanel events={stream.events} />
           </div>
         </div>
+      )}
+
+      {tab === "mission" && (
+        <SecurityMissionPanel
+          run={run}
+          events={stream.events}
+          findings={findings}
+          patches={patches}
+          gauntlets={gauntlets}
+          clauses={clauses}
+          certificates={certificates}
+        />
       )}
 
       {tab === "findings" && (
