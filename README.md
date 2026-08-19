@@ -2,6 +2,36 @@
 
 **Graph-grounded autonomous cyber-reasoning with proof-carrying repair.**
 
+<p align="center">
+  <img src="https://img.shields.io/badge/deploy-self--hosted-6E56CF?style=flat&labelColor=1f2937" alt="self-hosted" />
+  <img src="https://img.shields.io/badge/RBAC-15%20permissions-6E56CF?style=flat&labelColor=1f2937" alt="RBAC 15 permissions" />
+  <img src="https://img.shields.io/badge/sandbox%20egress-0%20bytes-3DDC84?style=flat&labelColor=1f2937" alt="sandbox egress 0 bytes" />
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3.13-3776AB?style=flat&logo=python&logoColor=white&labelColor=1f2937" alt="Python 3.13" />
+  <img src="https://img.shields.io/badge/FastAPI-0.141-009688?style=flat&logo=fastapi&logoColor=white&labelColor=1f2937" alt="FastAPI 0.141" />
+  <img src="https://img.shields.io/badge/SQLAlchemy-2.0%20async-D71F00?style=flat&logo=sqlalchemy&logoColor=white&labelColor=1f2937" alt="SQLAlchemy 2.0 async" />
+  <img src="https://img.shields.io/badge/LangGraph-1.2-1C3C3C?style=flat&logo=langgraph&logoColor=white&labelColor=1f2937" alt="LangGraph 1.2" />
+  <img src="https://img.shields.io/badge/PostgreSQL-16-4169E1?style=flat&logo=postgresql&logoColor=white&labelColor=1f2937" alt="PostgreSQL 16" />
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Next.js-16-000000?style=flat&logo=nextdotjs&logoColor=white&labelColor=1f2937" alt="Next.js 16" />
+  <img src="https://img.shields.io/badge/React-19-61DAFB?style=flat&logo=react&logoColor=white&labelColor=1f2937" alt="React 19" />
+  <img src="https://img.shields.io/badge/TypeScript-5.7-3178C6?style=flat&logo=typescript&logoColor=white&labelColor=1f2937" alt="TypeScript 5.7" />
+  <img src="https://img.shields.io/badge/Tailwind-3.4-06B6D4?style=flat&logo=tailwindcss&logoColor=white&labelColor=1f2937" alt="Tailwind 3.4" />
+  <img src="https://img.shields.io/badge/Docker-Compose-2496ED?style=flat&logo=docker&logoColor=white&labelColor=1f2937" alt="Docker Compose" />
+</p>
+
+<p align="center">
+  <a href="#the-one-command-path">Quick start</a> ·
+  <a href="docs/ARCHITECTURE.md">Architecture</a> ·
+  <a href="docs/SECURITY.md">Security</a> ·
+  <a href="docs/HONESTY.md">Honesty</a> ·
+  <a href="docs/DEMO.md">Demo</a>
+</p>
+
 > KavachX does not simply find a crash and generate a patch. It first reconstructs an
 > executable behavioural specification called **SAMHITA**, uses that specification to
 > discover violations, validates findings deterministically, repairs the root cause,
@@ -16,24 +46,36 @@ Understand → Discover → Validate → Shield → Repair → Attack Repair →
 
 ## The one command path
 
-### Windows (PowerShell) — recommended for this repository
+### Fastest: the self-contained end-to-end proof
 
-```powershell
-.\scripts\dev.ps1
+```bash
+make demo
 ```
 
-That script will:
+This drives the full loop — detect → adversarial validation → patch → gauntlet re-attack →
+signed certificate — against the seeded vulnerable target, in-process on SQLite with the
+deterministic proposer. It needs no PostgreSQL, no Docker and no API keys, and prints the
+KAVACH SECURITY PROOF with real reproduction counts, gauntlet stage tallies and certificate
+hashes.
 
-1. verify `uv`, `node`, and Docker Desktop,
-2. start PostgreSQL (`docker compose up -d postgres`),
-3. create the backend virtualenv with `uv sync`,
-4. run `alembic upgrade head`,
-5. seed the demo organisation, project, local authorised repository and demo user,
-6. install frontend dependencies,
-7. start FastAPI on `:8000` and Next.js on `:3000`.
+### The interactive console
+
+```bash
+make bootstrap   # env + deps + PostgreSQL + migrations + demo seed (needs Docker Desktop)
+make dev         # FastAPI on :8000, Next.js on :3000
+```
+
+Or run the two processes directly, without make:
+
+```powershell
+# terminal 1 — API
+cd backend; uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+# terminal 2 — console
+cd frontend; npm run dev
+```
 
 Then open <http://localhost:3000>, click **Launch Console**, and log in with the seeded
-credentials printed by the script (default `demo@kavachx.io` / `kavachx-demo-2024`).
+credentials (default `demo@kavachx.io` / `kavachx-demo-2024`).
 
 ### Full Docker path (Linux / macOS / Windows with Docker Desktop)
 
@@ -136,7 +178,7 @@ kavachx/
 │   ├── vulnerable-demo/      seeded vulnerable Python service (primary, cross-platform)
 │   └── vulnerable-c-demo/    seeded C target for the ASan/libFuzzer path (Linux)
 ├── infrastructure/
-├── scripts/                  dev.ps1, dev.sh, seed, headless demo driver
+├── backend/scripts/          seed (demo tenant, project, authorised local repository)
 ├── docs/
 ├── docker-compose.yml
 ├── .env.example

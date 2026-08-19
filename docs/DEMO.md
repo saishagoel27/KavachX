@@ -7,26 +7,27 @@ required — everything below runs locally and produces real evidence.
 
 ## Run it
 
-### Windows
-
-```powershell
-.\scripts\dev.ps1 -Demo
-```
-
-### Linux / macOS / WSL
+### The self-contained proof (any OS)
 
 ```bash
 make demo
 ```
 
-### Already have the stack up?
+This drives the full loop against the seeded target in-process on SQLite with the deterministic
+proposer — no PostgreSQL, no Docker, no keys — and prints the KAVACH SECURITY PROOF with real
+reproduction counts, gauntlet stage tallies and certificate hashes.
+
+Without `make`, the same driver is:
 
 ```bash
-python scripts/demo_e2e.py --profile quick
+cd backend && uv run pytest -s -v tests/test_e2e.py::test_full_pipeline
 ```
 
-Or drive it from the browser: <http://localhost:3000> → **Launch Console** → sign in as
-`demo@kavachx.io` / `kavachx-demo-2024` → **New Security Run** → **Start KavachX Analysis**.
+### Or drive it from the browser
+
+Bring the stack up (`make dev`, or the two `uv run uvicorn` / `npm run dev` processes) then open
+<http://localhost:3000> → **Launch Console** → sign in as `demo@kavachx.io` /
+`kavachx-demo-2024` → **New Security Run** → **Start KavachX Analysis**.
 
 ---
 

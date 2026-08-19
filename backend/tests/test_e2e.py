@@ -209,6 +209,31 @@ async def test_full_pipeline(client: httpx.AsyncClient, tenant_a, demo_repo_path
 
     assert any(c["assurance_level"] != AssuranceLevel.R.value for c in certificates)
 
+    # --- proof summary (shown under `make demo` / pytest -s) --------------
+    print("\n" + "=" * 60)
+    print("  KAVACH SECURITY PROOF")
+    print("=" * 60)
+    for finding in validated:
+        print(f"  Vulnerability      {finding['cwe']}  ({finding['severity']})")
+        print(f"  Location           {finding['location']}")
+        print(f"  Exploit reproduced {finding['reproduction_count']}x")
+    verified_patches = [p for p in patches if p["status"] == "VERIFIED"]
+    refuted_patches = [p for p in patches if p["status"] == "REFUTED"]
+    print(f"  Patches            {len(verified_patches)} verified / {len(refuted_patches)} refuted")
+    for gauntlet in gauntlets:
+        for stage in gauntlet["stages"]:
+            if stage["cases_total"]:
+                print(
+                    f"  {stage['stage']:<20} {stage['cases_passed']}/{stage['cases_total']}"
+                    f" {stage['verdict'].upper()}"
+                )
+    for certificate in certificates:
+        print(
+            f"  Certificate        {certificate['serial']}  LEVEL {certificate['assurance_level']}"
+        )
+        print(f"  Hash               sha256:{certificate['certificate_hash']}")
+    print("=" * 60)
+
     # --- evidence graph has no dangling claims ---------------------------
     graph = (await client.get(f"/api/runs/{run_id}/evidence", headers=auth(token))).json()
     refs = {node["ref"] for node in graph["nodes"]}

@@ -460,7 +460,7 @@ def test_sandbox_executes_on_a_selector_event_loop(tmp_path):
 
     uvicorn's loop factory returns a ``SelectorEventLoop`` on Windows whenever ``--reload`` or
     ``--workers`` is used, and ``asyncio.create_subprocess_exec`` raises a bare
-    ``NotImplementedError()`` there. Since ``scripts/dev.ps1`` uses ``--reload``, the documented way
+    ``NotImplementedError()`` there. Since the documented run command uses ``--reload``, the documented way
     to run KavachX on Windows silently disabled every execution-based guarantee in the product:
     SAMHITA observation, deterministic validation, the shield check and the whole gauntlet. A run
     reported ``NotImplementedError:`` with an empty message.

@@ -5,34 +5,20 @@ analysis pipeline all run natively — no WSL required for the demo path.
 
 ---
 
-## One command
+## The fastest path — the self-contained proof
+
+No database, no Docker, no keys. From the repository root:
 
 ```powershell
-.\scripts\dev.ps1
+cd backend; uv run pytest -s -v tests/test_e2e.py::test_full_pipeline
 ```
 
-Add `-Demo` to drive a full run and print the certificate afterwards:
+This drives the full loop against the seeded target on SQLite with the deterministic proposer and
+prints the KAVACH SECURITY PROOF (real reproduction counts, gauntlet stage tallies, certificate
+hashes). With `make` available it is simply `make demo`.
 
-```powershell
-.\scripts\dev.ps1 -Demo
-```
-
-The script verifies prerequisites, starts PostgreSQL if Docker Desktop is running (and falls back to
-SQLite if not), creates the virtualenv, migrates, seeds, installs frontend dependencies, and opens
-both servers in their own PowerShell windows.
-
-| Flag | Effect |
-| --- | --- |
-| `-SkipDocker` | Use SQLite instead of PostgreSQL. Everything works, including the full pipeline. |
-| `-SkipFrontend` | Backend only |
-| `-Demo` | Run the headless end-to-end demo after startup |
-| `-Reset` | Drop the database, volumes and sandbox workspaces first |
-
-If PowerShell blocks the script:
-
-```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-```
+For the interactive console, follow **Manual steps** below (or `make dev` under Git Bash), which
+runs the API on `:8000` and the console on `:3000`.
 
 ---
 
@@ -91,8 +77,9 @@ if sys.platform == "win32" and not use_subprocess:
 return asyncio.SelectorEventLoop
 ```
 
-`use_subprocess` is true whenever `--reload` or `--workers` is passed — and `scripts/dev.ps1` starts
-the backend with `--reload`. On Windows, `asyncio.create_subprocess_exec` is **not implemented** on a
+`use_subprocess` is true whenever `--reload` or `--workers` is passed — and the documented run
+command (`uvicorn app.main:app --reload`) starts the backend with `--reload`. On Windows,
+`asyncio.create_subprocess_exec` is **not implemented** on a
 `SelectorEventLoop`: it raises a bare `NotImplementedError()` with no message and, because logifyx's
 formatter ignored `exc_info`, no traceback either. Every execution-based guarantee in the product
 failed at the first spawn — SAMHITA observation, deterministic validation, the shield check, the whole
@@ -127,9 +114,8 @@ in `docs/DEMO.md` by exactly that character, which is correct behaviour rather t
 
 ### Console encoding
 
-The Windows console defaults to cp1252 and cannot print box-drawing characters. `scripts/demo_e2e.py`
-reconfigures stdout to UTF-8 and falls back to ASCII replacement if that fails. If you still see
-mojibake:
+The Windows console defaults to cp1252 and cannot print box-drawing characters. If the proof output
+or run log shows mojibake, force UTF-8:
 
 ```powershell
 $env:PYTHONIOENCODING = "utf-8"

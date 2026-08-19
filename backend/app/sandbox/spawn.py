@@ -10,8 +10,8 @@ That is not a hypothetical. uvicorn 0.52's loop factory reads:
         return asyncio.ProactorEventLoop
     return asyncio.SelectorEventLoop
 
-``use_subprocess`` is true whenever ``--reload`` or ``--workers`` is passed — and ``scripts/dev.ps1``
-starts the backend with ``--reload``. So the documented way to run KavachX on its primary developer
+``use_subprocess`` is true whenever ``--reload`` or ``--workers`` is passed — and the documented run
+command (``uvicorn app.main:app --reload``) starts the backend with ``--reload``. So running KavachX on its primary developer
 platform produced a Selector loop, and every sandbox execution failed at the first spawn: SAMHITA
 observation, validation, the shield check and the whole gauntlet. The run reported
 ``NotImplementedError:`` with an empty message and no traceback.

@@ -1413,6 +1413,64 @@ export function LogPanel({ events }: { events: Enveloped[] }) {
 // ---------------------------------------------------------------------------
 // Security Mission (Red vs Blue)
 // ---------------------------------------------------------------------------
+function DataFlowTrace({ finding, patched }: { finding: Finding; patched: boolean }) {
+  const chain = (finding.root_cause_chain ?? []).filter(Boolean);
+  const flow = chain.length
+    ? chain
+    : [finding.location, finding.root_cause_location].filter(Boolean);
+  if (flow.length === 0) return null;
+
+  // The last node is the sink; everything before it is the path that reaches it.
+  const path = flow.slice(0, -1);
+  const sink = flow[flow.length - 1];
+
+  return (
+    <div className="mt-3">
+      <div className="mb-1.5 flex items-center gap-2">
+        <span className="text-[10px] uppercase font-mono text-foreground-faint">Data flow</span>
+        <span
+          className={cn(
+            "text-[10px] font-mono font-bold",
+            patched ? "text-verified" : "text-refuted",
+          )}
+        >
+          source → sink
+        </span>
+      </div>
+      <div className="rounded border border-border/60 bg-surface-lowest p-2.5 font-mono text-[11px] leading-relaxed">
+        {path.map((step, index) => (
+          <div key={index}>
+            <div className="flex items-start gap-1.5 text-foreground-muted">
+              <span className="text-accent/60">{index === 0 ? "▸" : "↓"}</span>
+              <span className="min-w-0 break-all">{step}</span>
+            </div>
+          </div>
+        ))}
+        <div className="mt-0.5 flex items-start gap-1.5">
+          <span className={patched ? "text-verified" : "text-refuted"}>
+            {patched ? "✓" : "⚠"}
+          </span>
+          <span
+            className={cn(
+              "min-w-0 break-all font-bold",
+              patched ? "text-verified" : "text-refuted",
+            )}
+          >
+            {sink}
+            {finding.cwe ? ` — ${finding.cwe}` : ""}
+            {patched ? " (MITIGATED)" : ""}
+          </span>
+        </div>
+        {!patched && finding.root_cause_summary && (
+          <p className="mt-1.5 border-t border-border/50 pt-1.5 text-[10px] text-foreground-faint not-italic">
+            {finding.root_cause_summary}
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function SecurityMissionPanel({
   run,
   events,
@@ -1433,24 +1491,107 @@ export function SecurityMissionPanel({
   const hasFindings = findings.length > 0;
   const isStatic = run.mode === "static_only";
 
-  // Compute stats for certificate
-  const verifiedFinding = findings.find((f) => f.state === "validated");
-  const activeCertificate = certificates?.[0] || run.certificates?.[0];
+  // ---- Evidence-driven proof state (no fabricated numbers) ----
+  // The verified patch is the verification ENGINE's determination (it only reaches VERIFIED after
+  // the gauntlet passes) — never an LLM claim. Every number below is read from a real record or
+  // shown as pending. Nothing here is hardcoded to success.
+  const verifiedPatch =
+    patches.find((p) => p.status === "VERIFIED" || p.status === "PUBLISHED") ?? null;
+  const refutedPatches = patches.filter(
+    (p) => p.status === "REFUTED" || p.status === "POLICY_REJECTED",
+  );
+  const reproducedFinding =
+    findings.find((f) => f.state === "validated" && f.reproduced) ??
+    findings.find((f) => f.reproduced) ??
+    null;
+  const anyValidated = findings.some((f) => f.state === "validated");
 
-  // Count benign cases from gauntlet stage differential replay if possible
-  const diffReplayStage = gauntlets
-    .flatMap((g) => g.stages)
-    .find((s) => s.stage === "differential_replay");
-  
-  const regPassed = diffReplayStage?.cases_passed ?? 0;
-  const regTotal = diffReplayStage?.cases_total ?? 0;
+  // Gauntlet run tied to the verified patch — mutation + regression numbers come from HERE only.
+  const proofGauntlet =
+    (verifiedPatch ? gauntlets.find((g) => g.patch_id === verifiedPatch.id) : null) ??
+    gauntlets.find((g) => g.verdict === "pass") ??
+    null;
+  const mutationStage = proofGauntlet?.stages.find((s) => s.stage === "exploit_mutation") ?? null;
+  const regressionStage =
+    proofGauntlet?.stages.find((s) => s.stage === "differential_replay") ?? null;
 
-  const exploitMutationStage = gauntlets
-    .flatMap((g) => g.stages)
-    .find((s) => s.stage === "exploit_mutation");
-  
-  const mutPassed = exploitMutationStage?.cases_passed ?? 0;
-  const mutTotal = exploitMutationStage?.cases_total ?? 0;
+  // Certificate for display (serial/hash/level) — only a real, non-refuted certificate.
+  const proofCert =
+    certificates.find(
+      (c) => c.finding_handle === verifiedPatch?.finding_handle && c.assurance_level !== "R",
+    ) ??
+    certificates.find((c) => c.assurance_level !== "R") ??
+    null;
+
+  // The finding this proof is about.
+  const verifiedFinding = verifiedPatch
+    ? (findings.find((f) => f.handle === verifiedPatch.finding_handle) ?? reproducedFinding)
+    : (reproducedFinding ?? findings[0] ?? null);
+
+  // Overall proof status, decided by evidence — VERIFIED only when a patch survived the gauntlet.
+  const proofStatus: "VERIFIED" | "FAILED" | "PENDING" | "NONE" = verifiedPatch
+    ? "VERIFIED"
+    : anyValidated && refutedPatches.length > 0
+      ? "FAILED"
+      : anyValidated
+        ? "PENDING"
+        : "NONE";
+  const proofTone: "verified" | "refuted" | "warn" =
+    proofStatus === "VERIFIED" ? "verified" : proofStatus === "FAILED" ? "refuted" : "warn";
+  const proofBanner: Record<typeof proofStatus, string> = {
+    VERIFIED: "PATCH VERIFIED ✓",
+    FAILED: "PATCH REJECTED ✗",
+    PENDING: "VERIFICATION IN PROGRESS",
+    NONE: "AWAITING VALIDATED FINDING",
+  };
+
+  const stageLine = (
+    stage: { verdict: string; cases_passed: number; cases_total: number } | null,
+  ) =>
+    stage
+      ? {
+          tone: (stage.verdict === "pass" ? "verified" : "refuted") as "verified" | "refuted",
+          text: `${stage.verdict === "pass" ? "✓" : "✗"} ${stage.cases_passed}/${stage.cases_total} ${
+            stage.verdict === "pass" ? "PASS" : "FAIL"
+          }`,
+        }
+      : { tone: "warn" as const, text: "… pending" };
+  const mutationLine = stageLine(mutationStage);
+  const regressionLine = stageLine(regressionStage);
+
+  const proofRows: { label: string; tone: "verified" | "refuted" | "warn"; text: string }[] = [
+    {
+      label: "1. Adversarial Exploit Reproduced",
+      tone: reproducedFinding ? "verified" : "warn",
+      text: reproducedFinding
+        ? `✓ ${reproducedFinding.reproduction_count}× reproduced`
+        : "… pending",
+    },
+    {
+      label: "2. Blue Team Patch Generated",
+      tone: patches.length > 0 ? "verified" : "warn",
+      text: patches.length > 0 ? `✓ ${patches.length} candidate(s)` : "… pending",
+    },
+    {
+      label: "3. Patch Applied & Survived Gauntlet",
+      tone: verifiedPatch ? "verified" : refutedPatches.length > 0 ? "refuted" : "warn",
+      text: verifiedPatch
+        ? "✓ VERIFIED"
+        : refutedPatches.length > 0
+          ? `✗ ${refutedPatches.length} refuted`
+          : "… pending",
+    },
+    {
+      label: "4. Exploit Mutation Attacks Blocked",
+      tone: mutationLine.tone,
+      text: mutationLine.text,
+    },
+    {
+      label: "5. Benign Regression Invariants Intact",
+      tone: regressionLine.tone,
+      text: regressionLine.text,
+    },
+  ];
 
   return (
     <div className="space-y-6">
@@ -1532,6 +1673,15 @@ export function SecurityMissionPanel({
 
                       <h4 className="font-semibold text-sm mt-2 text-foreground">{f.title}</h4>
                       <p className="text-xs text-foreground-muted mt-1 font-mono">Location: {f.location}</p>
+
+                      <DataFlowTrace
+                        finding={f}
+                        patched={patches.some(
+                          (p) =>
+                            p.finding_handle === f.handle &&
+                            (p.status === "VERIFIED" || p.status === "PUBLISHED"),
+                        )}
+                      />
 
                       {f.reproduction_count > 0 && (
                         <div className="mt-2.5 p-2 bg-surface-lowest rounded border border-border/60 text-xs font-mono space-y-1">
@@ -1680,71 +1830,130 @@ export function SecurityMissionPanel({
             </div>
           </div>
 
-          {/* Proof of Patch (Kavach Security Certificate) */}
+          {/* Proof of Patch — Kavach Security Verification Proof (evidence-driven, never fabricated) */}
           <div className="pt-4 max-w-2xl mx-auto">
-            <div className="relative rounded-xl border-2 border-verified/50 bg-surface-lowest p-6 md:p-8 shadow-[0_0_20px_rgba(61,220,132,0.15)] transition-all duration-300 transform hover:scale-[1.01]">
+            <div
+              className={cn(
+                "relative rounded-xl border-2 bg-surface-lowest p-6 md:p-8 transition-all duration-300",
+                proofTone === "verified" &&
+                  "border-verified/50 shadow-[0_0_20px_rgba(61,220,132,0.15)]",
+                proofTone === "refuted" &&
+                  "border-refuted/50 shadow-[0_0_20px_rgba(239,68,68,0.12)]",
+                proofTone === "warn" && "border-warn/40",
+              )}
+            >
               {/* Certificate Decorative Corners */}
-              <div className="absolute top-2 left-2 border-t-2 border-l-2 border-verified/60 w-4 h-4" />
-              <div className="absolute top-2 right-2 border-t-2 border-r-2 border-verified/60 w-4 h-4" />
-              <div className="absolute bottom-2 left-2 border-b-2 border-l-2 border-verified/60 w-4 h-4" />
-              <div className="absolute bottom-2 right-2 border-b-2 border-r-2 border-verified/60 w-4 h-4" />
+              {(["top-2 left-2 border-t-2 border-l-2", "top-2 right-2 border-t-2 border-r-2", "bottom-2 left-2 border-b-2 border-l-2", "bottom-2 right-2 border-b-2 border-r-2"] as const).map(
+                (pos) => (
+                  <div
+                    key={pos}
+                    className={cn(
+                      "absolute w-4 h-4",
+                      pos,
+                      proofTone === "verified" && "border-verified/60",
+                      proofTone === "refuted" && "border-refuted/60",
+                      proofTone === "warn" && "border-warn/50",
+                    )}
+                  />
+                ),
+              )}
 
               <div className="text-center space-y-2">
-                <div className="inline-flex items-center justify-center p-2 rounded-full bg-verified/10 text-verified mb-2">
-                  <ShieldCheck className="h-8 w-8" />
+                <div
+                  className={cn(
+                    "inline-flex items-center justify-center p-2 rounded-full mb-2",
+                    proofTone === "verified" && "bg-verified/10 text-verified",
+                    proofTone === "refuted" && "bg-refuted/10 text-refuted",
+                    proofTone === "warn" && "bg-warn/10 text-warn",
+                  )}
+                >
+                  {proofStatus === "VERIFIED" ? (
+                    <ShieldCheck className="h-8 w-8" />
+                  ) : proofStatus === "FAILED" ? (
+                    <AlertOctagon className="h-8 w-8" />
+                  ) : (
+                    <Swords className="h-8 w-8" />
+                  )}
                 </div>
-                <h3 className="font-mono text-lg md:text-xl font-bold tracking-wider text-verified uppercase">
+                <h3
+                  className={cn(
+                    "font-mono text-lg md:text-xl font-bold tracking-wider uppercase",
+                    proofTone === "verified" && "text-verified",
+                    proofTone === "refuted" && "text-refuted",
+                    proofTone === "warn" && "text-warn",
+                  )}
+                >
                   Kavach Security Verification Proof
                 </h3>
                 <p className="text-xs text-foreground-faint font-mono">
-                  DETERMINISTIC CRYPTOGRAPHIC MITIGATION CERTIFICATE
+                  {proofCert
+                    ? "DETERMINISTIC CRYPTOGRAPHIC MITIGATION CERTIFICATE"
+                    : "PROOF STATE DERIVED FROM LIVE VERIFICATION EVIDENCE"}
                 </p>
               </div>
 
               <div className="mt-6 border-t border-b border-border/80 py-4 font-mono text-xs md:text-sm space-y-3">
                 <div className="flex justify-between gap-4">
                   <span className="text-foreground-muted">Target Repository</span>
-                  <span className="text-foreground font-bold truncate max-w-[260px] md:max-w-md">{run.repository_full_name}</span>
+                  <span className="text-foreground font-bold truncate max-w-[260px] md:max-w-md">
+                    {run.repository_full_name || "—"}
+                  </span>
                 </div>
                 <div className="flex justify-between gap-4">
                   <span className="text-foreground-muted">Vulnerability Target</span>
-                  <span className="text-refuted font-bold">{verifiedFinding?.cwe || "CWE-Classification"}</span>
+                  <span className="text-refuted font-bold">{verifiedFinding?.cwe || "—"}</span>
                 </div>
                 <div className="flex justify-between gap-4">
                   <span className="text-foreground-muted">Assurance Level</span>
-                  <span className="text-verified font-bold">LEVEL {activeCertificate?.assurance_level || "A"}</span>
+                  <span
+                    className={cn(
+                      "font-bold",
+                      proofCert ? "text-verified" : "text-foreground-faint",
+                    )}
+                  >
+                    {proofCert ? `LEVEL ${proofCert.assurance_level}` : "not yet issued"}
+                  </span>
                 </div>
 
                 <div className="border-t border-border/60 my-3 pt-3 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-foreground-muted">1. Adversarial Exploit Reproduced</span>
-                    <span className="text-verified font-bold">✓ YES</span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-foreground-muted">2. Blue Team Patch Applied</span>
-                    <span className="text-verified font-bold">✓ YES</span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-foreground-muted">3. Exploit Mutation Attacks Blocked</span>
-                    <span className="text-verified font-bold">✓ {mutPassed || 47}/{mutTotal || 47} PASS</span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-foreground-muted">4. Benign Regression Invariants Intact</span>
-                    <span className="text-verified font-bold">✓ {regPassed || 248}/{regTotal || 248} PASS</span>
-                  </div>
+                  {proofRows.map((row) => (
+                    <div key={row.label} className="flex items-center justify-between gap-3">
+                      <span className="text-foreground-muted">{row.label}</span>
+                      <span
+                        className={cn(
+                          "font-bold shrink-0",
+                          row.tone === "verified" && "text-verified",
+                          row.tone === "refuted" && "text-refuted",
+                          row.tone === "warn" && "text-warn",
+                        )}
+                      >
+                        {row.text}
+                      </span>
+                    </div>
+                  ))}
                 </div>
               </div>
 
               <div className="mt-6 flex flex-col md:flex-row items-center justify-between gap-4">
                 <div className="font-mono text-[10px] text-foreground-faint text-center md:text-left">
-                  <div>Serial: {activeCertificate?.serial || "KAV-9482-10482"}</div>
-                  <div className="truncate max-w-[260px] md:max-w-xs" title={activeCertificate?.certificate_hash}>
-                    Hash: {activeCertificate?.certificate_hash || "sha256:7c89f2a0b12e3d4c...8e"}
+                  <div>Serial: {proofCert?.serial || "— pending certificate"}</div>
+                  <div
+                    className="truncate max-w-[260px] md:max-w-xs"
+                    title={proofCert?.certificate_hash}
+                  >
+                    Hash: {proofCert?.certificate_hash || "— no certificate issued yet"}
                   </div>
                 </div>
 
-                <div className="px-4 py-2 border border-verified rounded bg-verified/5 text-verified font-mono text-xs font-bold uppercase tracking-widest">
-                  PATCH VERIFIED ✓
+                <div
+                  className={cn(
+                    "px-4 py-2 border rounded font-mono text-xs font-bold uppercase tracking-widest",
+                    proofTone === "verified" && "border-verified bg-verified/5 text-verified",
+                    proofTone === "refuted" && "border-refuted bg-refuted/5 text-refuted",
+                    proofTone === "warn" && "border-warn bg-warn/5 text-warn",
+                  )}
+                >
+                  {proofBanner[proofStatus]}
                 </div>
               </div>
             </div>

@@ -1,7 +1,9 @@
 # KavachX
 #
-# The one command path is `make demo` (or `.\scripts\dev.ps1 -Demo` on Windows): it brings the
-# stack up, drives a full run against the seeded vulnerable target, and prints the certificate.
+# The one command path is `make demo`: it drives the full end-to-end loop (detect → adversarial
+# validation → patch → gauntlet re-attack → signed certificate) against the seeded vulnerable
+# target, in-process on SQLite + the deterministic proposer, so it needs no Postgres and no keys.
+# `make dev` runs the API and console together for the interactive console.
 
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
@@ -75,16 +77,15 @@ frontend: ## Run the console on :3000
 	cd $(FRONTEND) && npm run dev
 
 .PHONY: dev
-dev: ## Run backend and frontend together
-	@bash scripts/dev.sh
+dev: ## Run backend (:8000) and frontend (:3000) together; Ctrl-C stops both
+	@trap 'kill 0' EXIT; \
+	( cd $(BACKEND) && $(UV) run uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload ) & \
+	( cd $(FRONTEND) && npm run dev ) & \
+	wait
 
 .PHONY: demo
-demo: ## Bootstrap, start the API, drive a full run, print the certificate
-	@bash scripts/dev.sh --demo
-
-.PHONY: demo-only
-demo-only: ## Drive the headless demo against an already-running API
-	$(PY) scripts/demo_e2e.py --profile quick
+demo: ## Drive the full end-to-end loop against the seeded target and print the certificate
+	cd $(BACKEND) && $(UV) run pytest -s -v tests/test_e2e.py::test_full_pipeline
 
 # ---------------------------------------------------------------------------
 .PHONY: test

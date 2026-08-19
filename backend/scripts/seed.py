@@ -8,7 +8,7 @@ Creates (idempotently):
 * the seeded local vulnerable repository with authority recorded,
 * one member per role, so RBAC behaviour is demonstrable in the UI without extra setup.
 
-Run with ``python -m scripts.seed`` from ``backend/``, or via ``scripts/dev.ps1``.
+Run with ``python -m scripts.seed`` from ``backend/`` (or ``make seed``).
 """
 
 from __future__ import annotations
