@@ -227,8 +227,8 @@ console shows as `UNVERIFIED`.
   syscall allowlist from one reproduction is not something to improvise.
 - **Publisher**: defaults to `PUBLISHER_DRY_RUN=true` and writes the exact intended payload as an
   artifact instead of calling GitHub. The live path is implemented (branch → contents API → PR →
-  labels) but is only exercisable with a configured GitHub App. A public repository can never reach
-  it at all — see [SECURITY.md](SECURITY.md) §1.1.
+  labels) but is only exercisable with a configured fine-grained token that has push access. A
+  public repository can never reach it at all — see [SECURITY.md](SECURITY.md) §1.1.
 - **Public repository ingestion** uses the unauthenticated REST API, so it is subject to GitHub's
   anonymous rate limit (60 requests/hour/IP). A 403 is surfaced as a rate-limit message rather than
   being retried behind the operator's back.

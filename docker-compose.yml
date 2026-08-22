@@ -62,8 +62,7 @@ services:
       SANDBOX_WORKSPACE_ROOT: /workspaces
       DEMO_REPO_PATH: /app/examples/vulnerable-demo
       PUBLISHER_DRY_RUN: ${PUBLISHER_DRY_RUN:-true}
-      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
-      GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       SEED_DEMO: "true"
     ports:
       - "8000:8000"

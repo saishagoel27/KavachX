@@ -290,8 +290,8 @@ export default function DashboardPage() {
               </span>
             </div>
             <p className="text-[11px] leading-4 text-foreground-faint">
-              A run cannot start against a repository without verified authority — either a GitHub
-              App installation that includes it, or the seeded local target.
+              A run cannot start against a repository without verified authority — either a
+              fine-grained token with push access to it, or the seeded local target.
             </p>
           </div>
         </Panel>

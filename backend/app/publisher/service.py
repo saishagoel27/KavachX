@@ -30,7 +30,7 @@ from typing import Any
 from app.config import settings
 from app.core.hashing import sha256_json, sha256_text
 from app.core.logging import get_logger
-from app.github.app_client import GithubAppClient, RepositoryRef, parse_full_name
+from app.github.app_client import GithubApiError, GithubClient, RepositoryRef, parse_full_name
 from app.models.enums import AssuranceLevel
 from app.patching.diffing import split_multifile_diff
 from app.patching.policy import PolicyConfig, evaluate
@@ -102,13 +102,13 @@ class PublishResult:
 
 class Publisher:
     def __init__(
-        self, *, client: GithubAppClient | None = None, dry_run: bool | None = None
+        self, *, client: GithubClient | None = None, dry_run: bool | None = None
     ) -> None:
         self.dry_run = settings.publisher_dry_run if dry_run is None else dry_run
         self._client = client
         if not self.dry_run and self._client is None:
             # Constructed here and nowhere else: the credential boundary is this line.
-            self._client = GithubAppClient()
+            self._client = GithubClient()
 
     # ------------------------------------------------------------------
     async def publish(self, request: PublishRequest) -> PublishResult:
@@ -193,18 +193,18 @@ class Publisher:
 
         # -- 3-6. live publish --------------------------------------------
         assert self._client is not None
-        if request.installation_id is None:
-            result.blocked_reason = "No GitHub App installation is linked to this repository."
-            result.duration_ms = int((time.perf_counter() - started) * 1000)
-            return result
 
         repo = parse_full_name(request.repository_full_name)
         repo.default_branch = request.base_branch
 
-        # Minted here, scoped to one repository, discarded when this frame exits.
-        token = await self._client.installation_token(
-            request.installation_id, repositories=[repo.name]
-        )
+        # Authority is confirmed against the API, never taken from the caller's claim: the token
+        # must actually have push access to this repository.
+        verdict = await self._client.verify_repository_authority(request.repository_full_name)
+        if not verdict["authorised"]:
+            result.blocked_reason = verdict["reason"]
+            result.duration_ms = int((time.perf_counter() - started) * 1000)
+            return result
+
         try:
             if branch == request.base_branch:
                 result.blocked_reason = (
@@ -213,13 +213,12 @@ class Publisher:
                 )
                 return result
 
-            await self._client.create_branch(token, repo, branch=branch, from_sha=request.base_sha)
+            await self._client.create_branch(repo, branch=branch, from_sha=request.base_sha)
             result.commit_shas = []
 
             for path, content in sorted(files.items()):
-                existing_sha = await self._existing_sha(token, repo, path, request.base_branch)
+                existing_sha = await self._existing_sha(repo, path, request.base_branch)
                 response = await self._client.put_file(
-                    token,
                     repo,
                     path=path,
                     content_b64=base64.b64encode(content.encode("utf-8")).decode("ascii"),
@@ -233,7 +232,6 @@ class Publisher:
                 result.artifacts_written.append(path)
 
             pull = await self._client.create_pull_request(
-                token,
                 repo,
                 title=_pr_title(request),
                 head=branch,
@@ -246,7 +244,6 @@ class Publisher:
             if result.pull_request_number:
                 try:
                     await self._client.add_labels(
-                        token,
                         repo,
                         issue_number=result.pull_request_number,
                         labels=[
@@ -266,18 +263,16 @@ class Publisher:
                 pr=result.pull_request_number,
                 files=len(result.artifacts_written),
             )
-        finally:
-            # Explicit: the token must not outlive this call.
-            token = ""
+        except GithubApiError as exc:
+            result.blocked_reason = f"GitHub rejected the publish: {exc}"
+            logger.warning("publisher.github_error", finding=request.finding_handle, error=str(exc))
 
         result.duration_ms = int((time.perf_counter() - started) * 1000)
         return result
 
-    async def _existing_sha(
-        self, token: str, repo: RepositoryRef, path: str, ref: str
-    ) -> str | None:
+    async def _existing_sha(self, repo: RepositoryRef, path: str, ref: str) -> str | None:
         try:
-            data = await self._client.get_file(token, repo, path, ref)  # type: ignore[union-attr]
+            data = await self._client.get_file(repo, path, ref)  # type: ignore[union-attr]
         except Exception:
             return None
         sha = data.get("sha") if isinstance(data, dict) else None
@@ -417,8 +412,8 @@ def _guarantees() -> dict[str, Any]:
         "never_rewrites_history": True,
         "never_amends_commits": True,
         "never_executes_repository_code": True,
-        "installation_token_persisted": False,
-        "token_scope": "single repository, minted per publish",
+        "credential_persisted": False,
+        "token_scope": "fine-grained PAT, push access verified before write",
         "policy_gate_reevaluated_at_publish": True,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }

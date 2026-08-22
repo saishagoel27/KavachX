@@ -176,7 +176,7 @@ async def ready(db: AsyncSession = Depends(get_db)) -> ReadyOut:
         sandbox_suitable_for_untrusted_code=bool(
             configured.get("suitable_for_untrusted_code", False)
         ),
-        github_app_configured=settings.github_app_configured,
+        github_configured=settings.github_configured,
         publisher_dry_run=settings.publisher_dry_run,
         active_runs=runner.active_run_ids(),
         details=details,

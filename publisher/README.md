@@ -13,7 +13,7 @@ KavachX does two things that must never touch each other:
 | Holds a GitHub credential | never | **yes** |
 
 If those mixed, hostile code from an analysed repository would be running in a process that can push
-to that repository. So the Publisher is the only component that constructs `GithubAppClient`, and it
+to that repository. So the Publisher is the only component that constructs `GithubClient`, and it
 runs no code at all.
 
 ## Enforced, not assumed
@@ -21,29 +21,29 @@ runs no code at all.
 Four tests in `backend/tests/test_security_boundary.py` assert this against the actual source tree:
 
 - `test_only_the_publisher_imports_the_github_client` — walks every module and fails if any outside
-  `publisher/`, `github/`, `api/` or `config.py` references `GithubAppClient` or the key accessor.
+  `publisher/`, `github/`, `api/` or `config.py` references `GithubClient`.
 - `test_orchestrator_does_not_import_the_publisher` — the orchestrator imports neither
   `app.publisher` nor `app.github`.
 - `test_publisher_never_executes_code` — no `subprocess`, no `app.sandbox`, no `app.gauntlet`, no
   `eval`, no `exec`. Checked with comments and docstrings stripped, so a module that *documents* not
   using subprocess still passes.
-- `test_installation_tokens_are_never_persisted` — no model mentions `access_token`.
+- `test_installation_tokens_are_never_persisted` — no model persists an access token.
 
-## The credential chain
+## The credential
 
 ```
-GitHub App private key  (a file or a secret manager; never in the database)
-        ↓  RS256, regenerated per call, ≤ 9 minutes
-App JWT
-        ↓  POST /app/installations/{id}/access_tokens  with repositories: [one]
-Installation access token
-        ↓  held in a local variable, discarded when publish() returns
+GITHUB_TOKEN  (a fine-grained personal access token; from the environment / a secret manager,
+               never written to the database)
+        ↓  Contents: read/write + Pull requests: read/write, scoped to the target repositories
+        ↓  push access confirmed against GET /repos/{owner}/{name} before any write
+held in a local attribute on the client the Publisher constructs, and nowhere else
 ```
 
-There is no column, cache or attribute anywhere that stores an installation token. Only the
-*installation id* is persisted, and that is not a credential.
+There is no column, cache or attribute anywhere that stores the token. Authority is not taken from
+the caller's claim: the token must actually have `push` permission on the repository, checked live.
 
-There is **no personal access token path.** Not configurable, not a fallback.
+There is **no GitHub App path** and no long-lived classic PAT: a fine-grained token is repo-scoped,
+permission-scoped and expiring.
 
 ## What it receives
 
@@ -91,7 +91,7 @@ API.
 
 `PUBLISHER_DRY_RUN=true` (the default) sends nothing to GitHub and instead returns the complete
 intended payload — branch, PR title and body, every file, and the guarantee block — as a run
-artifact. The whole path is exercisable without a live GitHub App, and the end-to-end test asserts
+artifact. The whole path is exercisable without a live GitHub token, and the end-to-end test asserts
 the guarantees.
 
 ## Scope

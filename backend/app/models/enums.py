@@ -211,27 +211,27 @@ class ExecutionProfile(StrEnum):
 
 
 class RepositoryProvider(StrEnum):
-    GITHUB_APP = "github_app"
+    GITHUB = "github"
     LOCAL_SEEDED = "local_seeded"
     #: A public GitHub repository, ingested read-only from published source.
     #:
-    #: Analysis-only by construction: there is no installation token behind it, so it can never
-    #: reach the Publisher. Reading published source and executing it in a sandbox is ordinary
-    #: security research; opening a pull request against a repository you do not control is not.
+    #: Analysis-only by construction: no write credential is attached to it, so it can never reach
+    #: the Publisher. Reading published source and executing it in a sandbox is ordinary security
+    #: research; opening a pull request against a repository you do not control is not.
     GITHUB_PUBLIC = "github_public"
 
 
 #: Providers that may reach the Publisher.
 #:
-#: * ``github_app`` — verified authority over the repository. The only provider that can produce a
-#:   *live* pull request, because it is the only one with an installation token behind it.
+#: * ``github`` — write authority over the repository, confirmed by the configured fine-grained
+#:   token actually having push access. The only provider that can produce a *live* pull request.
 #: * ``local_seeded`` — the operator's own tree inside this repository's ``examples/``. No third
 #:   party exists to publish to, so the dry-run payload is a demonstration and nothing more. A live
-#:   publish still fails on the missing installation.
+#:   publish still fails without a token that can push to it.
 #:
 #: ``github_public`` is deliberately absent. It is somebody else's repository: a dry-run payload
 #: announcing a push to it would be misleading, and if ``PUBLISHER_DRY_RUN`` were ever turned off it
 #: would be an attempted write to a repository the operator does not control.
 PUBLISHABLE_PROVIDERS: frozenset[str] = frozenset(
-    {RepositoryProvider.GITHUB_APP.value, RepositoryProvider.LOCAL_SEEDED.value}
+    {RepositoryProvider.GITHUB.value, RepositoryProvider.LOCAL_SEEDED.value}
 )

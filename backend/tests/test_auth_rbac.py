@@ -246,7 +246,7 @@ async def test_unauthorised_repository_rejected(client: httpx.AsyncClient, tenan
         repository = Repository(
             tenant_id=uuid.UUID(tenant_a["organisation_id"]),
             project_id=uuid.UUID(tenant_a["project_id"]),
-            provider="github_app",
+            provider="github",
             full_name="someone-else/private-repo",
             default_branch="main",
             authority_verified_at=None,

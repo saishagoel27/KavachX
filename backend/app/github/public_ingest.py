@@ -57,8 +57,8 @@ class RepositoryNotPublic(KavachError):
     status_code = 403
     code = "REPOSITORY_NOT_PUBLIC"
     message = (
-        "That repository is not publicly readable. Install the KavachX GitHub App to analyse a "
-        "private repository."
+        "That repository is not publicly readable. Configure a fine-grained token with access to "
+        "it to analyse a private repository."
     )
 
 
@@ -266,7 +266,7 @@ async def resolve_repository(ref: PublicRepoRef) -> PublicRepoInfo:
         if response.status_code == 403 and "rate limit" in response.text.lower():
             raise RepositoryFetchFailed(
                 "GitHub's unauthenticated rate limit was reached. Wait a few minutes, or "
-                "install the GitHub App for authenticated access.",
+                "configure a fine-grained token for authenticated access.",
                 code="GITHUB_RATE_LIMITED",
             )
         if response.status_code >= 400:

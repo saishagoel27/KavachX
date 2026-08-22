@@ -210,8 +210,8 @@ export function PublicRepoAttach({
             <span className="text-warn">Analysis only.</span> KavachX holds no credential for this
             repository, so it can read the published source and execute it in the sandbox, but it
             can never open a pull request against it. Verified patches and certificates are
-            available as run artifacts for a human to apply. Publishing requires a GitHub App
-            installation that includes the repository.
+            available as run artifacts for a human to apply. Publishing requires a fine-grained
+            token with push access to the repository.
           </WarningNote>
 
           {preview.notes.length > 0 && (

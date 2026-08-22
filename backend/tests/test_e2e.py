@@ -310,7 +310,7 @@ async def test_full_pipeline(client: httpx.AsyncClient, tenant_a, demo_repo_path
     guarantees = result["dry_run_payload"]["guarantees"]
     assert guarantees["never_pushes_to_default_branch"]
     assert guarantees["never_force_pushes"]
-    assert guarantees["installation_token_persisted"] is False
+    assert guarantees["credential_persisted"] is False
 
     # --- audit chain intact ----------------------------------------------
     chain = (await client.get("/api/audit/verify", headers=auth(token))).json()

@@ -171,10 +171,10 @@ class RepositoryAttach(BaseModel):
 
     Three authority paths, in descending capability:
 
-    * ``installation_id`` — a GitHub App installation that includes the repository. The only path
-      that can later publish a pull request.
+    * ``full_name`` with a configured ``GITHUB_TOKEN`` — a GitHub repository the fine-grained token
+      has push access to. The only path that can later publish a pull request.
     * ``public`` — a publicly readable GitHub repository, ingested read-only. Analysis only; it can
-      never reach the Publisher because there is no credential behind it.
+      never reach the Publisher because there is no write credential behind it.
     * ``local_seeded`` — the seeded target inside this repository's ``examples/`` tree (``DEV_MODE``).
     """
 
@@ -573,7 +573,7 @@ class ReadyOut(BaseModel):
     llm_configured: bool
     sandbox_adapter: str
     sandbox_suitable_for_untrusted_code: bool
-    github_app_configured: bool
+    github_configured: bool
     publisher_dry_run: bool
     active_runs: list[str]
     details: dict[str, Any] = Field(default_factory=dict)

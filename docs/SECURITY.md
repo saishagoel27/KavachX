@@ -11,18 +11,19 @@ exploits. Two facts shape the entire architecture:
 ## 1. Authorised targets only
 
 A run can only touch a repository with **verified authority**, and authority is re-checked at run
-start rather than trusted from attach time — a revoked installation stops new analysis even though
-the row still exists.
+start rather than trusted from attach time — a revoked token stops new analysis even though the row
+still exists.
 
 Three authority paths, and no others:
 
 | Path | How it is verified | May publish |
 | --- | --- | --- |
-| GitHub App installation | `GET /installation/repositories` must actually include the repository. A repository the caller merely named is rejected with `REPOSITORY_NOT_AUTHORISED`. | yes |
+| GitHub repository (fine-grained token) | `GET /repos/{owner}/{repo}` must return `permissions.push: true` for the configured token. A repository the caller merely named, or one the token can only read, is rejected with `REPOSITORY_NOT_AUTHORISED`. | yes |
 | Local seeded target (`DEV_MODE` only) | The path must resolve **inside this repository's own `examples/` tree**. That is the whole allowlist. | dry-run only |
 | Public GitHub repository | `GET /repos/{owner}/{repo}` must return `private: false`. Anything else — 404, private, unreachable — is refused. | **no** |
 
-There is no personal-access-token path. Not configurable, not a fallback. `DEV_MODE` does not mean
+The token is a fine-grained PAT (Contents + Pull requests, read/write), never a GitHub App and never
+a long-lived classic PAT. `DEV_MODE` does not mean
 "analyse any directory on this machine" — `test_local_target_outside_examples_rejected` asserts it.
 
 The caller must also affirm `authorisation_confirmed: true`, which is recorded in the audit log
@@ -35,7 +36,7 @@ pull request against a repository you do not control is not. KavachX enforces th
 structurally rather than by policy text:
 
 ```python
-PUBLISHABLE_PROVIDERS = frozenset({"github_app", "local_seeded"})   # github_public is absent
+PUBLISHABLE_PROVIDERS = frozenset({"github", "local_seeded"})   # github_public is absent
 ```
 
 That set is checked in **two independent places** — `node_publish_gate` in the orchestrator and the
@@ -45,8 +46,8 @@ remain available as run artifacts, which is the honest outcome: KavachX did the 
 a fix, and delivering that fix is the operator's decision to make through their own channel.
 
 The deeper reason it cannot leak is that there is **no credential to leak**. A public repository is
-fetched over unauthenticated HTTPS — `_client()` sends no `Authorization` header at all
-(`test_no_credential_is_sent_on_the_public_path`) — so no installation token exists on that path for
+fetched over unauthenticated HTTPS — the public-ingest path sends no `Authorization` header at all
+(`test_no_credential_is_sent_on_the_public_path`) — so no write token is attached to that path for
 the Publisher to use even if the gate were removed.
 
 Ingestion itself treats the archive as hostile input: the tarball is size-capped before and during
@@ -159,17 +160,17 @@ See [HONESTY.md](HONESTY.md) §5 for the honest status of PostgreSQL RLS as a se
 
 ## 9. The publisher is the only credentialed component
 
-- It is the **only** place `GithubAppClient` is constructed. A test walks the source tree and
-  asserts no other module (outside `publisher/`, `github/`, `api/`, and `config.py` which defines the
-  key accessor) references it.
+- It is the **only** place `GithubClient` is constructed. A test walks the source tree and
+  asserts no other module (outside `publisher/`, `github/`, `api/`, and `config.py`) references it.
 - The orchestrator — which runs alongside hostile-code execution — imports neither
   `app.publisher` nor `app.github`. Asserted.
 - It **never executes repository code**: no subprocess, no sandbox import, no `eval`, no `exec`.
   Asserted against the source with comments and docstrings stripped.
-- Chain: App private key → short-lived App JWT (≤ 9 minutes, regenerated per call, never cached) →
-  installation access token, **scoped to a single repository**, held in a local variable and
-  discarded when the call returns. There is no column, cache or attribute that stores one; a test
-  asserts the models never mention `access_token`.
+- Credential: a fine-grained personal access token (`GITHUB_TOKEN`), repo-scoped and
+  permission-scoped (Contents + Pull requests, read/write), read from the environment and held only
+  on the client the Publisher constructs. Push authority is confirmed against `GET /repos/{owner}/{repo}`
+  before any write. There is no column, cache or attribute that stores it; a test asserts the models
+  never persist an access token.
 - It **re-runs the policy gate** on the exact payload it is about to push. A gate you only pass once
   is a gate you can race.
 - It never pushes to the default branch, never force-pushes, never rewrites history, never amends.
@@ -229,7 +230,8 @@ change, certificate issue and download, PR published, publish blocked, and audit
    `FORCE ROW LEVEL SECURITY` plus a per-checkout `SET kavachx.tenant_id` (see HONESTY.md §5).
 5. Replace the HMAC certificate signature with an asymmetric one and publish the verification key.
 6. Keep `PUBLISHER_DRY_RUN=true` until you have reviewed a dry-run payload end to end.
-7. Store the GitHub App private key in a secret manager, not in `.env`.
+7. Store `GITHUB_TOKEN` in a secret manager, not in `.env`; scope it to the target repositories only
+   and set a short expiry.
 
 ## 13. Reporting
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { FolderGit2, Github, Plus, ShieldCheck } from "lucide-react";
+import { FolderGit2, Plus, ShieldCheck } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
@@ -101,32 +101,22 @@ export default function ProjectsPage() {
         />
       )}
 
-      <Panel title="GitHub App">
+      <Panel title="GitHub connection">
         {github?.configured ? (
           <div className="space-y-2">
             <div className="flex flex-wrap items-center gap-2">
-              <Chip tone="verified">CONFIGURED</Chip>
+              <Chip tone="verified">TOKEN CONFIGURED</Chip>
               <Chip tone={github.publisher_dry_run ? "warn" : "verified"}>
                 PUBLISHER {github.publisher_dry_run ? "DRY RUN" : "LIVE"}
               </Chip>
             </div>
-            {github.install_url && (
-              <a
-                href={String(github.install_url)}
-                target="_blank"
-                rel="noreferrer"
-                className="btn-secondary text-xs"
-              >
-                <Github className="h-3.5 w-3.5" />
-                Install the KavachX GitHub App
-              </a>
-            )}
             <p className="text-[11px] leading-4 text-foreground-faint">{String(github.notes)}</p>
           </div>
         ) : (
           <WarningNote>
-            The GitHub App is not configured on this deployment, so GitHub repositories cannot be
-            attached. In development mode you can still analyse the seeded local target below —
+            No GITHUB_TOKEN is configured on this deployment, so GitHub repositories cannot be
+            attached. Set a fine-grained personal access token (Contents and Pull requests
+            read/write). In development mode you can still analyse the seeded local target below —
             that is the only local path KavachX will accept.
           </WarningNote>
         )}

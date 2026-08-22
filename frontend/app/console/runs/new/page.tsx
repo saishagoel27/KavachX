@@ -14,7 +14,7 @@ import { Chip, ErrorNote, LoadingPanel, Panel, Spinner, WarningNote } from "@/co
  * `github_public` is absent on purpose: it is somebody else's repository, so a verified patch is
  * delivered as a run artifact rather than a pull request.
  */
-const PUBLISHABLE_PROVIDERS = new Set(["github_app", "local_seeded"]);
+const PUBLISHABLE_PROVIDERS = new Set(["github", "local_seeded"]);
 
 const ANALYSIS_PROFILES = [
   {
@@ -153,8 +153,8 @@ export default function NewRunPage() {
         <Panel title="No authorised repository">
           <p className="text-small text-foreground-muted">
             KavachX cannot start a run without a repository it has verified authority over. Attach a
-            public GitHub repository below, install the GitHub App for a private one, or use the
-            seeded local target in development mode.
+            public GitHub repository below, configure a fine-grained token with push access for a
+            private one, or use the seeded local target in development mode.
           </p>
           <div className="mt-4 flex flex-wrap gap-2">
             <button onClick={() => setShowPublic(true)} className="btn-primary text-xs">

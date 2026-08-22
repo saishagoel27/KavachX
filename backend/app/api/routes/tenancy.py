@@ -1,4 +1,4 @@
-"""Projects, repositories, GitHub App installations, members and policy."""
+"""Projects, repositories, GitHub connection, members and policy."""
 
 from __future__ import annotations
 
@@ -26,11 +26,10 @@ from app.core.errors import (
 from app.db.session import get_db
 from app.models.audit import AuditAction
 from app.models.enums import RepositoryProvider, Role
-from app.models.identity import GithubInstallation, OrganisationMember, User
+from app.models.identity import OrganisationMember, User
 from app.models.project import Project, Repository
 from app.models.run import Run
 from app.schemas.core import (
-    InstallationOut,
     MemberInvite,
     MemberOut,
     PolicyOut,
@@ -152,11 +151,11 @@ async def attach_repository(
 
     Three authority paths and no others, in descending capability:
 
-    * **GitHub App installation** — the installation must actually include the repository. The
-      check calls GitHub; a repository the caller merely named is rejected. This is the only path
-      that can later publish a pull request.
+    * **GitHub repository (fine-grained token)** — the configured token must actually have push
+      access. The check calls GitHub; a repository the caller merely named, or one the token can
+      only read, is rejected. This is the only path that can later publish a pull request.
     * **Public GitHub repository** — publicly readable source, ingested unauthenticated for
-      analysis only. Deliberately not publishable: there is no credential behind it, so the
+      analysis only. Deliberately not publishable: there is no write credential behind it, so the
       Publisher can never act on it.
     * **Local seeded target** (``DEV_MODE`` only) — the path must resolve inside this
       repository's own ``examples/`` tree. That is the whole allowlist: KavachX will not analyse
@@ -164,7 +163,7 @@ async def attach_repository(
     """
     if payload.public:
         # A public repository is ingested read-only. It is deliberately NOT publishable: there is
-        # no installation token behind it, so the Publisher can never act on it. Reading published
+        # no write credential behind it, so the Publisher can never act on it. Reading published
         # source and executing it in a sandbox is ordinary security research; opening a pull
         # request against a repository you do not control is not.
         if not payload.authorisation_confirmed:
@@ -208,8 +207,8 @@ async def attach_repository(
                 "attested_by": principal.label,
                 "publishable": False,
                 "publish_blocked_reason": (
-                    "Public repositories are analysis-only. Publishing requires a GitHub App "
-                    "installation that includes the repository."
+                    "Public repositories are analysis-only. Publishing requires a fine-grained "
+                    "token with push access to the repository."
                 ),
             },
             language_summary={
@@ -275,30 +274,14 @@ async def attach_repository(
             authority_evidence=evidence,
         )
     else:
-        if payload.installation_id is None:
-            raise BadRequest(
-                "A GitHub App installation id is required to attach a GitHub repository.",
-                code="INSTALLATION_REQUIRED",
-            )
-        installation = await db.scalar(
-            select(GithubInstallation).where(
-                GithubInstallation.tenant_id == principal.tenant_id,
-                GithubInstallation.installation_id == payload.installation_id,
-            )
-        )
-        if installation is None:
-            raise NotFound(
-                "That GitHub App installation is not linked to this organisation.",
-                code="INSTALLATION_NOT_FOUND",
-            )
-        if not settings.github_app_configured:
+        if not settings.github_configured:
             raise GithubNotConfigured()
 
-        from app.github.app_client import GithubAppClient
+        from app.github.app_client import GithubClient
 
-        verdict = await GithubAppClient().verify_repository_authority(
-            payload.installation_id, payload.full_name
-        )
+        # Authority is confirmed against the API: the configured fine-grained token must actually
+        # have push access to the repository. The user's claim is never taken at face value.
+        verdict = await GithubClient().verify_repository_authority(payload.full_name)
         if not verdict["authorised"]:
             await audit.record(
                 tenant_id=principal.tenant_id,
@@ -316,17 +299,16 @@ async def attach_repository(
         repository = Repository(
             tenant_id=principal.tenant_id,
             project_id=project.id,
-            provider=RepositoryProvider.GITHUB_APP.value,
+            provider=RepositoryProvider.GITHUB.value,
             full_name=str(info["full_name"]),
             default_branch=str(info.get("default_branch") or payload.default_branch or "main"),
             clone_url=f"https://github.com/{info['full_name']}.git",
             github_repo_id=info.get("id"),
-            installation_id=payload.installation_id,
+            installation_id=None,
             private=bool(info.get("private", True)),
             authority_verified_at=datetime.now(timezone.utc),
             authority_evidence={
-                "method": "github_app_installation",
-                "installation_id": payload.installation_id,
+                "method": "github_fine_grained_token",
                 "reason": verdict["reason"],
                 "permissions": info.get("permissions", {}),
             },
@@ -421,128 +403,21 @@ async def list_repositories(
 
 
 # ---------------------------------------------------------------------------
-# GitHub App installations
+# GitHub connection
 # ---------------------------------------------------------------------------
 @router.get("/github/app")
-async def github_app_info() -> dict[str, object]:
+async def github_info() -> dict[str, object]:
     return {
-        "configured": settings.github_app_configured,
-        "app_slug": settings.github_app_slug,
-        "install_url": (
-            f"https://github.com/apps/{settings.github_app_slug}/installations/new"
-            if settings.github_app_slug
-            else ""
-        ),
+        "configured": settings.github_configured,
+        "auth": "fine_grained_token",
         "publisher_dry_run": settings.publisher_dry_run,
         "dev_mode_local_target_available": settings.dev_mode and settings.demo_repo_dir.is_dir(),
         "notes": (
-            "KavachX authenticates as a GitHub App and mints short-lived installation tokens on "
-            "demand. Installation tokens are never persisted, and personal access tokens are not "
-            "supported."
+            "KavachX authenticates with a fine-grained personal access token (GITHUB_TOKEN) that "
+            "needs Contents: read/write and Pull requests: read/write on the target repository. "
+            "The token is never written to the database, and push authority is confirmed against "
+            "the API before any write."
         ),
-    }
-
-
-@router.post("/github/installations", response_model=InstallationOut, status_code=201)
-async def link_installation(
-    installation_id: int,
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-    principal: Principal = Depends(RequirePermission(Permission.REPOSITORY_MANAGE)),
-    audit: AuditService = Depends(get_audit),
-) -> InstallationOut:
-    if not settings.github_app_configured:
-        raise GithubNotConfigured()
-
-    from app.github.app_client import GithubAppClient
-
-    client = GithubAppClient()
-    info = await client.get_installation(installation_id)
-    account = info.get("account") or {}
-
-    existing = await db.scalar(
-        select(GithubInstallation).where(
-            GithubInstallation.tenant_id == principal.tenant_id,
-            GithubInstallation.installation_id == installation_id,
-        )
-    )
-    row = existing or GithubInstallation(
-        tenant_id=principal.tenant_id, installation_id=installation_id
-    )
-    row.account_login = str(account.get("login", ""))
-    row.account_type = str(account.get("type", "Organization"))
-    row.target_id = info.get("target_id")
-    row.permissions_json = info.get("permissions", {})
-    row.repository_selection = str(info.get("repository_selection", "selected"))
-    row.suspended = bool(info.get("suspended_at"))
-    row.installed_by = principal.user_id
-    row.verified_at = datetime.now(timezone.utc)
-    if existing is None:
-        db.add(row)
-    await db.flush()
-
-    await audit.record(
-        tenant_id=principal.tenant_id,
-        action=AuditAction.REPOSITORY_INSTALLED,
-        actor_user_id=principal.user_id,
-        actor_label=principal.label,
-        subject_type="github_installation",
-        subject_id=str(installation_id),
-        source_ip=client_ip(request),
-        detail={"account": row.account_login, "selection": row.repository_selection},
-    )
-    return InstallationOut.model_validate(row)
-
-
-@router.get("/github/installations", response_model=list[InstallationOut])
-async def list_installations(
-    db: AsyncSession = Depends(get_db),
-    principal: Principal = Depends(get_current_principal),
-) -> list[InstallationOut]:
-    rows = list(
-        (
-            await db.scalars(
-                select(GithubInstallation).where(
-                    GithubInstallation.tenant_id == principal.tenant_id
-                )
-            )
-        ).all()
-    )
-    return [InstallationOut.model_validate(r) for r in rows]
-
-
-@router.get("/github/installations/{installation_id}/repositories")
-async def list_installation_repositories(
-    installation_id: int,
-    db: AsyncSession = Depends(get_db),
-    principal: Principal = Depends(RequirePermission(Permission.REPOSITORY_MANAGE)),
-) -> dict[str, object]:
-    linked = await db.scalar(
-        select(GithubInstallation).where(
-            GithubInstallation.tenant_id == principal.tenant_id,
-            GithubInstallation.installation_id == installation_id,
-        )
-    )
-    if linked is None:
-        raise NotFound("Installation not linked to this organisation.")
-    if not settings.github_app_configured:
-        raise GithubNotConfigured()
-
-    from app.github.app_client import GithubAppClient
-
-    repositories = await GithubAppClient().list_installation_repositories(installation_id)
-    return {
-        "installation_id": installation_id,
-        "repositories": [
-            {
-                "full_name": r.get("full_name"),
-                "id": r.get("id"),
-                "default_branch": r.get("default_branch"),
-                "private": r.get("private"),
-                "language": r.get("language"),
-            }
-            for r in repositories
-        ],
     }
 
 

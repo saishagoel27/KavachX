@@ -208,11 +208,12 @@ strict Pydantic schema; a schema failure is a model failure, never a silent pass
 
 KavachX is a **defensive** security research platform.
 
-- A run needs one of exactly three authority paths: a GitHub App installation that actually
-  lists the repository, the local seeded target inside this repository's own `examples/`
-  tree (`DEV_MODE` only), or a **public** GitHub repository the operator names and confirms
-  they are authorised to analyse. There is no personal-access-token path, and `DEV_MODE`
-  does not mean "analyse any directory on this machine".
+- A run needs one of exactly three authority paths: a GitHub repository the configured
+  fine-grained token has **push** access to, the local seeded target inside this repository's
+  own `examples/` tree (`DEV_MODE` only), or a **public** GitHub repository the operator names
+  and confirms they are authorised to analyse. Push authority is verified against the GitHub API,
+  never taken from the caller's claim, and `DEV_MODE` does not mean "analyse any directory on
+  this machine".
 - **Only the first two can publish.** A public repository is somebody else's; KavachX will
   analyse published source and hand you the patch, but it will not open a pull request
   against a repository you do not control, and it holds no credential that would let it.

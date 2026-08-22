@@ -172,8 +172,7 @@ async def seed() -> dict[str, object]:
                     "path": str(demo_path),
                     "note": (
                         "DEV_MODE seeded target inside this repository's examples/ tree. This is "
-                        "the only local path KavachX will analyse without a GitHub App "
-                        "installation."
+                        "the only local path KavachX will analyse without a GitHub token."
                     ),
                 },
                 language_summary={"python": True},

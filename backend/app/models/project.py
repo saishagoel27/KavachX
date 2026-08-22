@@ -42,10 +42,10 @@ class Project(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 class Repository(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     """A repository this tenant has proven authority over.
 
-    ``authority_verified_at`` is set only after the GitHub App installation is confirmed to
-    include this repository (or, in ``DEV_MODE``, after the local seeded path is confirmed
-    to live inside the repository's own ``examples/`` tree). ``run:start`` refuses to touch
-    a repository without it.
+    ``authority_verified_at`` is set only after the configured fine-grained token is confirmed to
+    have push access to this repository (or, in ``DEV_MODE``, after the local seeded path is
+    confirmed to live inside the repository's own ``examples/`` tree). ``run:start`` refuses to
+    touch a repository without it.
     """
 
     __tablename__ = "repositories"

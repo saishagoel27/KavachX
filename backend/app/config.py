@@ -101,14 +101,10 @@ class Settings(BaseSettings):
     max_clause_iterations: int = 2
     run_max_runtime_seconds: int = 1800
 
-    # --- github app --------------------------------------------------------
-    github_app_id: str = ""
-    github_app_slug: str = "kavachx"
-    github_app_client_id: str = ""
-    github_app_client_secret: str = ""
-    github_app_webhook_secret: str = ""
-    github_app_private_key_path: str = ""
-    github_app_private_key: str = ""
+    # --- github (fine-grained personal access token) -----------------------
+    # A fine-grained PAT with Contents: read/write and Pull requests: read/write, scoped to the
+    # repositories KavachX may open pull requests against. There is no GitHub App path.
+    github_token: str = ""
     github_api_base: str = "https://api.github.com"
     publisher_dry_run: bool = True
 
@@ -207,24 +203,8 @@ class Settings(BaseSettings):
         return True
 
     @property
-    def github_app_configured(self) -> bool:
-        return bool(self.github_app_id) and bool(
-            self.github_app_private_key or self.github_app_private_key_path
-        )
-
-    def github_private_key_pem(self) -> str | None:
-        """Resolve the GitHub App private key.
-
-        Only the publisher process is meant to call this. It is deliberately a method,
-        not a field, so the value never appears in a settings dump or log line.
-        """
-        if self.github_app_private_key:
-            return self.github_app_private_key.replace("\\n", "\n")
-        if self.github_app_private_key_path:
-            p = Path(self.github_app_private_key_path)
-            if p.is_file():
-                return p.read_text(encoding="utf-8")
-        return None
+    def github_configured(self) -> bool:
+        return bool(self.github_token)
 
     def safe_dump(self) -> dict[str, object]:
         """Settings snapshot with every secret redacted — safe for logs and /health."""
@@ -233,10 +213,7 @@ class Settings(BaseSettings):
             "certificate_signing_key",
             "groq_api_key",
             "llama_api_key",
-            "github_app_client_secret",
-            "github_app_webhook_secret",
-            "github_app_private_key",
-            "github_app_private_key_path",
+            "github_token",
             "demo_user_password",
             "database_url",
         }

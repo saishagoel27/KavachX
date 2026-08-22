@@ -623,7 +623,7 @@ verdict    not admissible as evidence`}
             {
               icon: <Target className="h-4 w-4" />,
               title: "Authority is verified, not claimed",
-              body: "A repository can only be analysed if the GitHub App installation actually includes it, or it is the seeded local target inside this repository's own examples tree. Authority is re-checked at run start.",
+              body: "A repository can only be analysed if the configured fine-grained token actually has push access to it, or it is the seeded local target inside this repository's own examples tree. Authority is re-checked at run start.",
             },
             {
               icon: <TerminalSquare className="h-4 w-4" />,

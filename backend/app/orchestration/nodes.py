@@ -2214,9 +2214,9 @@ async def node_publish_gate(ctx: RunContext, state: KavachState) -> KavachState:
         c for c in state.get("certificates", []) if c["assurance_level"] != AssuranceLevel.R.value
     ]
 
-    # Publishing needs a credential, and a credential only exists for a GitHub App installation.
-    # Blocking here — rather than when a reviewer clicks Approve — means the console tells the truth
-    # about what this run can produce from the moment it finishes.
+    # Publishing needs a credential, and a credential only exists for a repository the configured
+    # fine-grained token can push to. Blocking here — rather than when a reviewer clicks Approve —
+    # means the console tells the truth about what this run can produce from the moment it finishes.
     provider_publishable = bool(state.get("target", {}).get("publishable", False))
     if publishable and not provider_publishable:
         await ctx.emitter.thought(
@@ -2225,7 +2225,7 @@ async def node_publish_gate(ctx: RunContext, state: KavachState) -> KavachState:
             evidence=[
                 f"{len(publishable)} certificate(s) above Level R",
                 f"provider: {state.get('target', {}).get('provider', 'unknown')}",
-                "no GitHub App installation is linked to this repository",
+                "no fine-grained token with push access is configured for this repository",
             ],
             decision=(
                 "Publishing is unavailable for this repository. KavachX holds no credential for "
@@ -2236,7 +2236,7 @@ async def node_publish_gate(ctx: RunContext, state: KavachState) -> KavachState:
         )
         await ctx.emitter.phase_blocked(
             phase,
-            "this repository is analysis-only — publishing requires a GitHub App installation",
+            "this repository is analysis-only — publishing requires a fine-grained token with push access",
         )
         await _mark_phase(ctx, phase, "blocked")
         await ctx.emitter.status(

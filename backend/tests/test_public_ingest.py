@@ -233,7 +233,7 @@ def test_no_credential_is_sent_on_the_public_path():
 @pytest.mark.security
 def test_public_provider_is_not_publishable():
     assert RepositoryProvider.GITHUB_PUBLIC.value not in PUBLISHABLE_PROVIDERS
-    assert RepositoryProvider.GITHUB_APP.value in PUBLISHABLE_PROVIDERS
+    assert RepositoryProvider.GITHUB.value in PUBLISHABLE_PROVIDERS
 
 
 @pytest.mark.security

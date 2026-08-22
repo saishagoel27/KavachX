@@ -593,7 +593,7 @@ async def publish(
     if repository.provider not in PUBLISHABLE_PROVIDERS:
         raise PublishBlocked(
             f"{repository.full_name} was attached as a {repository.provider} repository, which is "
-            "analysis-only. Publishing requires a GitHub App installation that includes the "
+            "analysis-only. Publishing requires a fine-grained token with push access to the "
             "repository. The patch and its certificate are available as run artifacts.",
             code="PROVIDER_NOT_PUBLISHABLE",
         )

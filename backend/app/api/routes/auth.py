@@ -360,6 +360,5 @@ async def auth_config() -> dict[str, object]:
         "password_min_length": settings.password_min_length,
         "access_token_ttl_seconds": settings.access_token_ttl_seconds,
         "dev_mode": settings.dev_mode,
-        "github_app_configured": settings.github_app_configured,
-        "github_app_slug": settings.github_app_slug,
+        "github_configured": settings.github_configured,
     }

@@ -35,7 +35,7 @@ pytestmark = pytest.mark.security
 # sandbox environment
 # ---------------------------------------------------------------------------
 def test_sandbox_env_is_built_from_an_allowlist(monkeypatch):
-    monkeypatch.setenv("GITHUB_APP_PRIVATE_KEY", "-----BEGIN RSA PRIVATE KEY-----")
+    monkeypatch.setenv("GITHUB_TOKEN", "github_pat_super_secret")
     monkeypatch.setenv("GROQ_API_KEY", "gsk_super_secret")
     monkeypatch.setenv("JWT_SECRET", "the-signing-secret")
     monkeypatch.setenv("DATABASE_URL", "postgresql://user:password@host/db")
@@ -44,7 +44,7 @@ def test_sandbox_env_is_built_from_an_allowlist(monkeypatch):
     env = build_sandbox_env()
 
     for leaked in (
-        "GITHUB_APP_PRIVATE_KEY",
+        "GITHUB_TOKEN",
         "GROQ_API_KEY",
         "JWT_SECRET",
         "DATABASE_URL",
@@ -54,7 +54,7 @@ def test_sandbox_env_is_built_from_an_allowlist(monkeypatch):
 
     # And nothing that survived carries a secret value.
     joined = " ".join(env.values())
-    for secret in ("gsk_super_secret", "the-signing-secret", "aws-secret", "BEGIN RSA"):
+    for secret in ("gsk_super_secret", "the-signing-secret", "aws-secret", "github_pat_super_secret"):
         assert secret not in joined
 
     assert set(env) - {"no_proxy", "NO_PROXY", "http_proxy", "https_proxy"} <= set(
@@ -265,7 +265,7 @@ def test_only_the_publisher_imports_the_github_client():
         if relative.startswith(allowed):
             continue
         code = _code_only(path)
-        if "GithubAppClient" in code or "github_private_key_pem" in code:
+        if "GithubClient" in code:
             offenders.append(relative)
 
     assert offenders == [], (
@@ -274,12 +274,12 @@ def test_only_the_publisher_imports_the_github_client():
     )
 
 
-def test_settings_key_accessor_is_a_method_not_a_field():
-    """The private key must never appear in a settings dump, so it cannot be a plain field."""
+def test_github_token_is_redacted_in_settings_dump():
+    """The fine-grained token must never appear in a settings dump or log line."""
     from app.config import Settings
 
-    assert "github_private_key_pem" not in Settings.model_fields
-    assert callable(Settings.github_private_key_pem)
+    assert "github_token" in Settings.model_fields, "github_token must be a settings field"
+    assert settings.safe_dump()["github_token"] == "***redacted***"
 
 
 def test_orchestrator_does_not_import_the_publisher():
@@ -325,7 +325,7 @@ def test_settings_dump_redacts_every_secret():
         "jwt_secret",
         "certificate_signing_key",
         "groq_api_key",
-        "github_app_private_key",
+        "github_token",
         "database_url",
         "demo_user_password",
     ):

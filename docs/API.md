@@ -86,9 +86,7 @@ A cross-tenant id returns **404, not 403** — a 403 would confirm the id exists
 | `GET` | `/api/projects/{id}` | member |
 | `POST` | `/api/projects/{id}/repositories` | `repository:manage` — verifies authority before attaching |
 | `GET` | `/api/repositories` | member |
-| `GET` | `/api/github/app` | Configuration status and install URL |
-| `GET` `POST` | `/api/github/installations` | `repository:manage` to link |
-| `GET` | `/api/github/installations/{id}/repositories` | What the installation actually grants |
+| `GET` | `/api/github/app` | GitHub token configuration status (auth method, dry-run) |
 | `GET` | `/api/github/public/preview` | `repository:manage` — resolve a public repository before attaching |
 
 Transient upstream failures on the public path are retried up to 3 times with backoff — GitHub has

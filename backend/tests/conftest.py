@@ -34,7 +34,7 @@ os.environ.update(
         "JWT_SECRET": "test-secret-value-that-is-long-enough-for-hs256",
         "CERTIFICATE_SIGNING_KEY": "test-certificate-signing-key",
         "PUBLISHER_DRY_RUN": "true",
-        "GITHUB_APP_ID": "",
+        "GITHUB_TOKEN": "",
         "GROQ_API_KEY": "",
         "MAX_PATCH_ITERATIONS": "3",
         "MAX_CLAUSE_ITERATIONS": "2",

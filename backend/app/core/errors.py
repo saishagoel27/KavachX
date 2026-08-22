@@ -101,7 +101,7 @@ class RepositoryNotAuthorised(KavachError):
     code = "REPOSITORY_NOT_AUTHORISED"
     message = (
         "KavachX has no verified authority over this repository. "
-        "Install the GitHub App and grant access to it first."
+        "Configure a fine-grained token with push access to it first."
     )
 
 
@@ -200,4 +200,4 @@ class ModelContractError(KavachError):
 class GithubNotConfigured(KavachError):
     status_code = 503
     code = "GITHUB_NOT_CONFIGURED"
-    message = "The KavachX GitHub App is not configured on this deployment."
+    message = "No GITHUB_TOKEN is configured on this deployment."

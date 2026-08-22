@@ -1,27 +1,27 @@
-"""GitHub App client.
+"""GitHub client.
 
-Authentication chain: **App private key → short-lived App JWT → installation access token**.
+Authentication: a **fine-grained personal access token** (``GITHUB_TOKEN``), scoped by the token's
+owner to specific repositories and to the minimum permissions KavachX needs — ``Contents:
+read/write`` and ``Pull requests: read/write``.
 
 Rules this module exists to enforce:
 
-* There is **no personal access token path**. Not configurable, not a fallback.
-* Installation tokens are minted on demand, held in a local variable, and **never persisted**.
-  There is no field, cache or table for them; :meth:`GithubAppClient.installation_token` returns
-  one to its caller and keeps nothing.
-* The App JWT lives ten minutes at most (GitHub's ceiling) and is regenerated per call rather
-  than cached.
+* The token is read from settings, held in a local attribute, and **never written to the
+  database** — there is no column, cache or table for it (see the identity models and the
+  ``test_installation_tokens_are_never_persisted`` boundary test).
 * Only the publisher process constructs this client. The orchestrator never imports it, so
-  analysis code has no route to a credential even by mistake.
+  analysis code — which executes untrusted target code in a sandbox — has no route to a credential
+  even by mistake.
+* Authority over a repository is confirmed against the GitHub API (``push`` permission on the
+  repo), never taken from the user's claim at face value.
 """
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
-import jwt
 
 from app.config import settings
 from app.core.errors import GithubNotConfigured, KavachError
@@ -29,8 +29,6 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-#: GitHub rejects an App JWT with more than 10 minutes of life.
-JWT_TTL_SECONDS = 540
 USER_AGENT = "KavachX/1.0"
 
 
@@ -53,41 +51,29 @@ class RepositoryRef:
         return f"{self.owner}/{self.name}"
 
 
-class GithubAppClient:
+class GithubClient:
     def __init__(
         self,
         *,
-        app_id: str | None = None,
-        private_key_pem: str | None = None,
+        token: str | None = None,
         api_base: str | None = None,
     ) -> None:
-        self.app_id = app_id or settings.github_app_id
-        self._private_key = private_key_pem or settings.github_private_key_pem()
+        self.token = token or settings.github_token
         self.api_base = (api_base or settings.github_api_base).rstrip("/")
 
-        if not self.app_id or not self._private_key:
+        if not self.token:
             raise GithubNotConfigured(
-                "GITHUB_APP_ID and a private key are required. KavachX never uses a personal "
-                "access token."
+                "GITHUB_TOKEN (a fine-grained personal access token with Contents and "
+                "Pull requests read/write) is required to publish to GitHub."
             )
 
-    # ------------------------------------------------------------------
-    def _app_jwt(self) -> str:
-        """Short-lived App JWT. Generated per call; never cached, never stored."""
-        now = int(time.time())
-        return jwt.encode(
-            {"iat": now - 60, "exp": now + JWT_TTL_SECONDS, "iss": self.app_id},
-            self._private_key,
-            algorithm="RS256",
-        )
-
-    def _client(self, token: str, *, bearer: bool = False) -> httpx.AsyncClient:
-        scheme = "Bearer" if bearer else "token"
+    def _http(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(
             base_url=self.api_base,
             timeout=httpx.Timeout(30.0),
             headers={
-                "Authorization": f"{scheme} {token}",
+                # Fine-grained tokens authenticate as a Bearer credential.
+                "Authorization": f"Bearer {self.token}",
                 "Accept": "application/vnd.github+json",
                 "X-GitHub-Api-Version": "2022-11-28",
                 "User-Agent": USER_AGENT,
@@ -99,13 +85,11 @@ class GithubAppClient:
         method: str,
         path: str,
         *,
-        token: str,
-        bearer: bool = False,
         json_body: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
         expected: tuple[int, ...] = (200, 201),
     ) -> Any:
-        async with self._client(token, bearer=bearer) as client:
+        async with self._http() as client:
             try:
                 response = await client.request(method, path, json=json_body, params=params)
             except httpx.HTTPError as exc:
@@ -126,130 +110,77 @@ class GithubAppClient:
         return response.json()
 
     # ------------------------------------------------------------------
-    async def installation_token(
-        self, installation_id: int, *, repositories: list[str] | None = None
-    ) -> str:
-        """Mint an installation access token.
+    async def verify_repository_authority(self, full_name: str) -> dict[str, Any]:
+        """Confirm the token actually grants write access to ``full_name``.
 
-        Returned to the caller and **not stored anywhere**. Scoped to the named repositories when
-        given, so a token minted to open one PR cannot touch another repository.
+        This is the gate on publishing. A repository the user typed but the token cannot push to
+        is rejected — the user's claim of authority is never taken at face value.
         """
-        body: dict[str, Any] = {}
-        if repositories:
-            body["repositories"] = repositories
-        data = await self._request(
-            "POST",
-            f"/app/installations/{installation_id}/access_tokens",
-            token=self._app_jwt(),
-            bearer=True,
-            json_body=body or None,
-            expected=(201,),
-        )
-        token = str(data.get("token", ""))
-        if not token:
-            raise GithubApiError("GitHub returned no installation token.")
-        logger.info(
-            "github.installation_token_minted",
-            installation_id=installation_id,
-            expires_at=data.get("expires_at"),
-            repository_scope=repositories or "installation-wide",
-        )
-        return token
-
-    async def get_installation(self, installation_id: int) -> dict[str, Any]:
-        return await self._request(
-            "GET",
-            f"/app/installations/{installation_id}",
-            token=self._app_jwt(),
-            bearer=True,
-        )
-
-    async def list_installation_repositories(self, installation_id: int) -> list[dict[str, Any]]:
-        token = await self.installation_token(installation_id)
-        out: list[dict[str, Any]] = []
-        page = 1
-        while page <= 10:
-            data = await self._request(
-                "GET",
-                "/installation/repositories",
-                token=token,
-                params={"per_page": 100, "page": page},
-            )
-            batch = data.get("repositories", [])
-            out.extend(batch)
-            if len(batch) < 100:
-                break
-            page += 1
-        return out
-
-    async def verify_repository_authority(
-        self, installation_id: int, full_name: str
-    ) -> dict[str, Any]:
-        """Confirm this installation actually grants access to ``full_name``.
-
-        This is the gate on ``run:start``. A repository the user typed but the installation does
-        not include is rejected — the user's claim of authority is never taken at face value.
-        """
-        repositories = await self.list_installation_repositories(installation_id)
-        match = next(
-            (r for r in repositories if str(r.get("full_name", "")).lower() == full_name.lower()),
-            None,
-        )
-        if match is None:
+        try:
+            repo = await self._request("GET", f"/repos/{full_name}", expected=(200,))
+        except GithubApiError as exc:
             return {
                 "authorised": False,
                 "reason": (
-                    f"Installation {installation_id} does not include {full_name}. Grant the "
-                    "KavachX GitHub App access to that repository and retry."
+                    f"The configured GITHUB_TOKEN cannot access {full_name} "
+                    f"({exc.details.get('status', 'error') if exc.details else 'error'}). "
+                    "Grant the token access to that repository and retry."
                 ),
-                "available": sorted(str(r.get("full_name", "")) for r in repositories)[:50],
+            }
+
+        permissions = repo.get("permissions") or {}
+        if not permissions.get("push", False):
+            return {
+                "authorised": False,
+                "reason": (
+                    f"The configured GITHUB_TOKEN can read {full_name} but does not have write "
+                    "(push) access. A fine-grained token needs Contents: read/write and "
+                    "Pull requests: read/write."
+                ),
+                "repository": {
+                    "full_name": repo.get("full_name"),
+                    "permissions": permissions,
+                },
             }
         return {
             "authorised": True,
-            "reason": f"Installation {installation_id} includes {full_name}.",
+            "reason": f"The configured GITHUB_TOKEN has push access to {full_name}.",
             "repository": {
-                "full_name": match.get("full_name"),
-                "id": match.get("id"),
-                "default_branch": match.get("default_branch", "main"),
-                "private": match.get("private", True),
-                "permissions": match.get("permissions", {}),
+                "full_name": repo.get("full_name"),
+                "id": repo.get("id"),
+                "default_branch": repo.get("default_branch", "main"),
+                "private": repo.get("private", True),
+                "permissions": permissions,
             },
         }
 
     # ------------------------------------------------------------------
-    async def get_ref_sha(self, token: str, repo: RepositoryRef, ref: str) -> str:
-        data = await self._request(
-            "GET", f"/repos/{repo.full_name}/git/ref/heads/{ref}", token=token
-        )
+    async def get_ref_sha(self, repo: RepositoryRef, ref: str) -> str:
+        data = await self._request("GET", f"/repos/{repo.full_name}/git/ref/heads/{ref}")
         return str((data.get("object") or {}).get("sha", ""))
 
-    async def get_commit(self, token: str, repo: RepositoryRef, sha: str) -> dict[str, Any]:
-        return await self._request("GET", f"/repos/{repo.full_name}/commits/{sha}", token=token)
+    async def get_commit(self, repo: RepositoryRef, sha: str) -> dict[str, Any]:
+        return await self._request("GET", f"/repos/{repo.full_name}/commits/{sha}")
 
     async def create_branch(
-        self, token: str, repo: RepositoryRef, *, branch: str, from_sha: str
+        self, repo: RepositoryRef, *, branch: str, from_sha: str
     ) -> dict[str, Any]:
         return await self._request(
             "POST",
             f"/repos/{repo.full_name}/git/refs",
-            token=token,
             json_body={"ref": f"refs/heads/{branch}", "sha": from_sha},
             expected=(201,),
         )
 
-    async def get_file(
-        self, token: str, repo: RepositoryRef, path: str, ref: str
-    ) -> dict[str, Any]:
+    async def get_file(self, repo: RepositoryRef, path: str, ref: str) -> dict[str, Any]:
         return await self._request(
             "GET",
             f"/repos/{repo.full_name}/contents/{path}",
-            token=token,
             params={"ref": ref},
         )
 
     async def put_file(
         self,
-        token: str,
         repo: RepositoryRef,
         *,
         path: str,
@@ -268,14 +199,12 @@ class GithubAppClient:
         return await self._request(
             "PUT",
             f"/repos/{repo.full_name}/contents/{path}",
-            token=token,
             json_body=body,
             expected=(200, 201),
         )
 
     async def create_pull_request(
         self,
-        token: str,
         repo: RepositoryRef,
         *,
         title: str,
@@ -287,7 +216,6 @@ class GithubAppClient:
         return await self._request(
             "POST",
             f"/repos/{repo.full_name}/pulls",
-            token=token,
             json_body={
                 "title": title,
                 "head": head,
@@ -300,12 +228,11 @@ class GithubAppClient:
         )
 
     async def add_labels(
-        self, token: str, repo: RepositoryRef, *, issue_number: int, labels: list[str]
+        self, repo: RepositoryRef, *, issue_number: int, labels: list[str]
     ) -> Any:
         return await self._request(
             "POST",
             f"/repos/{repo.full_name}/issues/{issue_number}/labels",
-            token=token,
             json_body={"labels": labels},
             expected=(200, 201),
         )
@@ -319,4 +246,4 @@ def parse_full_name(full_name: str) -> RepositoryRef:
 
 
 def github_available() -> bool:
-    return settings.github_app_configured
+    return settings.github_configured

@@ -72,7 +72,7 @@ _SECRET_SUBSTRINGS = (
     "secret",
     "access_token",
     "refresh_token",
-    "installation_token",
+    "github_token",
     "signing_key",
     "client_secret",
     "webhook_secret",
