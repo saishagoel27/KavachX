@@ -4,9 +4,13 @@ Stored as short strings so that migrations stay boring and the values are readab
 SQL during an incident. Every state machine in KavachX is expressed here.
 """
 
-from __future__ import annotations
-
-from enum import StrEnum
+import sys
+from enum import Enum
+if sys.version_info >= (3, 11):
+    from enum import StrEnum
+else:
+    class StrEnum(str, Enum):
+        pass
 
 
 class Role(StrEnum):

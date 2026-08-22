@@ -19,7 +19,7 @@ from __future__ import annotations
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from app.config import settings
@@ -354,7 +354,7 @@ def build_certificate(
         return result
 
     serial = _serial(run["short_code"], finding["handle"])
-    issued_at = datetime.now(UTC).isoformat()
+    issued_at = datetime.now(timezone.utc).isoformat()
     verified_patch = next(
         (p for p in patches if p.get("status") == "VERIFIED"),
         patches[-1] if patches else None,

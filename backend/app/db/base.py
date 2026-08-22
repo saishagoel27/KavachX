@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import DateTime, MetaData, String, Uuid, func
@@ -27,7 +27,7 @@ UUIDType = Uuid(as_uuid=True)
 
 
 def utcnow() -> datetime:
-    return datetime.now(UTC)
+    return datetime.now(timezone.utc)
 
 
 def new_uuid() -> uuid.UUID:

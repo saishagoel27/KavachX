@@ -43,7 +43,7 @@ os.environ.update(
     }
 )
 
-from datetime import UTC
+from datetime import timezone
 
 import httpx
 
@@ -147,7 +147,7 @@ async def _make_tenant(
                 full_name="examples/vulnerable-demo",
                 default_branch="main",
                 local_path=str(settings.demo_repo_dir),
-                authority_verified_at=datetime.now(UTC),
+                authority_verified_at=datetime.now(timezone.utc),
                 authority_evidence={"method": "local_seeded", "test": True},
             )
             db.add(repository)

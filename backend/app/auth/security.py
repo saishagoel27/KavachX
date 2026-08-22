@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
 import bcrypt
@@ -49,7 +49,7 @@ def validate_password_strength(password: str) -> None:
 
 # ---------------------------------------------------------------------------
 def _now() -> datetime:
-    return datetime.now(UTC)
+    return datetime.now(timezone.utc)
 
 
 def create_token(

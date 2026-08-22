@@ -239,7 +239,7 @@ def test_public_provider_is_not_publishable():
 @pytest.mark.security
 async def test_publishing_a_public_repository_is_refused(client: httpx.AsyncClient, tenant_a):
     """A verified patch against somebody else's repository must not become a pull request."""
-    from datetime import UTC, datetime
+    from datetime import datetime, timezone
 
     from app.db.session import session_scope
     from app.models.analysis import Finding
@@ -258,7 +258,7 @@ async def test_publishing_a_public_repository_is_refused(client: httpx.AsyncClie
             full_name="someone-else/their-repo",
             default_branch="main",
             private=False,
-            authority_verified_at=datetime.now(UTC),
+            authority_verified_at=datetime.now(timezone.utc),
             authority_evidence={"method": "github_public", "publishable": False},
         )
         db.add(repository)
@@ -305,7 +305,7 @@ async def test_publishing_a_public_repository_is_refused(client: httpx.AsyncClie
             assurance_level=AssuranceLevel.A.value,
             document={"assurance": {"level": "A"}},
             certificate_hash="a" * 64,
-            issued_at=datetime.now(UTC),
+            issued_at=datetime.now(timezone.utc),
         )
         db.add(certificate)
         await db.flush()

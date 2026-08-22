@@ -8,14 +8,14 @@ same state, with the same rigour, and cannot be omitted.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from app.models.enums import AssuranceLevel
 
 
 def _stamp() -> str:
-    return datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S timezone.utc")
 
 
 def render_changes(

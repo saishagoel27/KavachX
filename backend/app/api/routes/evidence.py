@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -640,7 +640,7 @@ async def publish(
     if result.ok:
         patch.status = PatchStatus.PUBLISHED.value
         run.publish_approved_by = principal.user_id
-        run.publish_approved_at = datetime.now(UTC)
+        run.publish_approved_at = datetime.now(timezone.utc)
         if run.status == RunStatus.AWAITING_APPROVAL.value:
             run.status = RunStatus.COMPLETED.value
 

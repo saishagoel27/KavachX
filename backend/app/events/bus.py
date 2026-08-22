@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections import defaultdict
-from datetime import UTC
+from datetime import timezone
 from typing import Any
 
 from sqlalchemy import func, select
@@ -155,7 +155,7 @@ class _suppress_full:
 def _now_iso() -> str:
     from datetime import datetime
 
-    return datetime.now(UTC).isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 #: Process-wide singleton. One FastAPI worker owns one bus; DB persistence is the

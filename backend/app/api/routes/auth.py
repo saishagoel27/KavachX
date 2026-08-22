@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy import func, select
@@ -181,7 +181,7 @@ async def login(
             )
         raise InvalidCredentials()
 
-    user.last_login_at = datetime.now(UTC)
+    user.last_login_at = datetime.now(timezone.utc)
     membership = await default_membership(db, user.id)
     tenant_id = membership[0].id if membership else None
     role = membership[1].role if membership else None

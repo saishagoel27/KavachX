@@ -24,7 +24,7 @@ import base64
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from app.config import settings
@@ -420,7 +420,7 @@ def _guarantees() -> dict[str, Any]:
         "installation_token_persisted": False,
         "token_scope": "single repository, minted per publish",
         "policy_gate_reevaluated_at_publish": True,
-        "generated_at": datetime.now(UTC).isoformat(),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
 

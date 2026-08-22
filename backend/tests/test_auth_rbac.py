@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import jwt
@@ -94,7 +94,7 @@ async def test_token_signed_with_wrong_key_rejected(client: httpx.AsyncClient, t
             "typ": "access",
             "tid": tenant_a["organisation_id"],
             "iss": "kavachx",
-            "exp": int((datetime.now(UTC) + timedelta(hours=1)).timestamp()),
+            "exp": int((datetime.now(timezone.utc) + timedelta(hours=1)).timestamp()),
         },
         "a-completely-different-signing-key",
         algorithm="HS256",

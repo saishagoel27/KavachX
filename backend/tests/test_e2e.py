@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import UTC
+from datetime import timezone
 
 import httpx
 import pytest
@@ -366,7 +366,7 @@ async def test_level_r_certificate_cannot_publish(client: httpx.AsyncClient, ten
             assurance_level=AssuranceLevel.R.value,
             document={"assurance": {"level": "R"}},
             certificate_hash="0" * 64,
-            issued_at=datetime.now(UTC),
+            issued_at=datetime.now(timezone.utc),
         )
         db.add(certificate)
         await db.flush()
@@ -433,7 +433,7 @@ async def test_unexecutable_target_degrades_to_static_only(client: httpx.AsyncCl
                 full_name=f"examples/{target.name}",
                 default_branch="main",
                 local_path=str(target),
-                authority_verified_at=datetime.now(UTC),
+                authority_verified_at=datetime.now(timezone.utc),
                 authority_evidence={"method": "local_seeded", "test": True},
             )
             db.add(repository)

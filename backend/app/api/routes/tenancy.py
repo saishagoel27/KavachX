@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy import func, select
@@ -201,7 +201,7 @@ async def attach_repository(
             github_repo_id=info.repo_id,
             installation_id=None,
             private=False,
-            authority_verified_at=datetime.now(UTC),
+            authority_verified_at=datetime.now(timezone.utc),
             authority_evidence={
                 **info.as_evidence(),
                 "head_commit": commit,
@@ -271,7 +271,7 @@ async def attach_repository(
             default_branch=payload.default_branch or "main",
             local_path=str(target),
             private=True,
-            authority_verified_at=datetime.now(UTC),
+            authority_verified_at=datetime.now(timezone.utc),
             authority_evidence=evidence,
         )
     else:
@@ -323,7 +323,7 @@ async def attach_repository(
             github_repo_id=info.get("id"),
             installation_id=payload.installation_id,
             private=bool(info.get("private", True)),
-            authority_verified_at=datetime.now(UTC),
+            authority_verified_at=datetime.now(timezone.utc),
             authority_evidence={
                 "method": "github_app_installation",
                 "installation_id": payload.installation_id,
@@ -476,7 +476,7 @@ async def link_installation(
     row.repository_selection = str(info.get("repository_selection", "selected"))
     row.suspended = bool(info.get("suspended_at"))
     row.installed_by = principal.user_id
-    row.verified_at = datetime.now(UTC)
+    row.verified_at = datetime.now(timezone.utc)
     if existing is None:
         db.add(row)
     await db.flush()

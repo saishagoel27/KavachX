@@ -21,7 +21,7 @@ import json
 import shutil
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import select
@@ -982,7 +982,7 @@ async def node_validate(ctx: RunContext, state: KavachState) -> KavachState:
                 pov_kind=outcome.pov_kind,
                 pov_hash=sha256_text(outcome.pov_payload) if outcome.pov_payload else "",
                 evidence_refs=hypothesis_snapshot["evidence_refs"],
-                validated_at=datetime.now(UTC),
+                validated_at=datetime.now(timezone.utc),
                 status_label="VALIDATED",
             )
             db.add(finding)
@@ -1154,7 +1154,7 @@ async def node_shield(ctx: RunContext, state: KavachState) -> KavachState:
                         verified_benign=result.verified_benign,
                         benign_pass_count=result.benign_pass_count,
                         benign_total=result.benign_total,
-                        deployed_at=datetime.now(UTC),
+                        deployed_at=datetime.now(timezone.utc),
                         evidence_refs=[f"ev:shield:{result.handle}"],
                     )
                 )
@@ -1615,7 +1615,7 @@ async def node_patch_and_gauntlet(ctx: RunContext, state: KavachState) -> Kavach
                     row = await db.get(Patch, uuid.UUID(str(patch_row["id"])))
                     if row is not None:
                         row.status = PatchStatus.VERIFIED.value
-                        row.verified_at = datetime.now(UTC)
+                        row.verified_at = datetime.now(timezone.utc)
                 patch_row["status"] = PatchStatus.VERIFIED.value
                 patches_state.append(patch_row)
                 if first_repair_ms is None:
@@ -1634,7 +1634,7 @@ async def node_patch_and_gauntlet(ctx: RunContext, state: KavachState) -> Kavach
                 row = await db.get(Patch, uuid.UUID(str(patch_row["id"])))
                 if row is not None:
                     row.status = PatchStatus.REFUTED.value
-                    row.withdrawn_at = datetime.now(UTC)
+                    row.withdrawn_at = datetime.now(timezone.utc)
                     row.refutation_summary = outcome.summary
                     row.constraints = list(outcome.constraints)
             patch_row["status"] = PatchStatus.REFUTED.value
@@ -1785,8 +1785,8 @@ async def _record_gauntlet(
             verdict=outcome.verdict,
             stages_passed=outcome.stages_passed,
             stages_total=outcome.stages_total,
-            started_at=datetime.now(UTC),
-            finished_at=datetime.now(UTC),
+            started_at=datetime.now(timezone.utc),
+            finished_at=datetime.now(timezone.utc),
             duration_ms=outcome.duration_ms,
             failing_stage=outcome.failing_stage,
             summary=outcome.summary,
@@ -1946,7 +1946,7 @@ async def node_attest(ctx: RunContext, state: KavachState) -> KavachState:
                 evidence_node_count=len(graph.nodes),
                 evidence_edge_count=len(graph.edges),
                 generation_ms=certificate.generation_ms,
-                issued_at=datetime.now(UTC),
+                issued_at=datetime.now(timezone.utc),
             )
             db.add(row)
             await db.flush()

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from app.config import settings
@@ -212,7 +212,7 @@ async def _mark_started(run_id: uuid.UUID, *, provider_name: str) -> None:
         if run is None:
             return
         run.status = RunStatus.RUNNING.value
-        run.started_at = datetime.now(UTC)
+        run.started_at = datetime.now(timezone.utc)
         run.phase_status = dict.fromkeys(PHASE_ORDER, "pending")
         run.resource_budget = {
             **(run.resource_budget or {}),
@@ -234,7 +234,7 @@ async def _mark_finished(
         if run is None:
             return
         run.status = status
-        run.finished_at = datetime.now(UTC)
+        run.finished_at = datetime.now(timezone.utc)
         run.error_code = error_code
         run.error_message = error_message
         run.tokens_used = int(metrics.get("tokens", 0))

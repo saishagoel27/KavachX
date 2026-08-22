@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import re
 import sys
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import func, select
@@ -166,7 +166,7 @@ async def seed() -> dict[str, object]:
                 default_branch="main",
                 local_path=str(demo_path),
                 private=True,
-                authority_verified_at=datetime.now(UTC),
+                authority_verified_at=datetime.now(timezone.utc),
                 authority_evidence={
                     "method": "local_seeded",
                     "path": str(demo_path),

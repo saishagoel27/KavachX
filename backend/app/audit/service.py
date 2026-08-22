@@ -8,7 +8,7 @@ Verification therefore detects deletion, reordering and in-place edits.
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import func, select
@@ -77,7 +77,7 @@ class AuditService:
         )
         seq = (last.seq + 1) if last else 1
         previous_hash = last.hash if last else GENESIS_HASH
-        hashed_at = datetime.now(UTC).isoformat()
+        hashed_at = datetime.now(timezone.utc).isoformat()
         evidence_hash = sha256_json(detail) if detail else sha256_text("")
 
         event = AuditEvent(

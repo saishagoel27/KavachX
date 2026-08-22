@@ -6,7 +6,7 @@ import asyncio
 import json
 import secrets
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -383,7 +383,7 @@ async def stream_events(
                 {
                     "run_id": str(run_id),
                     "replay_from": after_seq,
-                    "server_time": datetime.now(UTC).isoformat(),
+                    "server_time": datetime.now(timezone.utc).isoformat(),
                 },
             )
 
@@ -408,7 +408,7 @@ async def stream_events(
                     status = await _run_status(run_id, tenant_id)
                     yield _sse(
                         "heartbeat",
-                        {"ts": datetime.now(UTC).isoformat(), "status": status},
+                        {"ts": datetime.now(timezone.utc).isoformat(), "status": status},
                     )
                     if status in terminal_statuses:
                         yield _sse("end", {"run_id": str(run_id), "status": status})
