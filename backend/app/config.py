@@ -80,9 +80,9 @@ class Settings(BaseSettings):
     # Groq
     groq_api_key: str = ""
     groq_base_url: str = "https://api.groq.com"
-    groq_model_workhorse: str = "llama-3.3-70b-versatile"
+    groq_model_workhorse: str = "openai/gpt-oss-120b"
     groq_model_router: str = "llama-3.1-8b-instant"
-    groq_model_security: str = "llama-3.3-70b-versatile"
+    groq_model_security: str = "openai/gpt-oss-120b"
 
     # llama.cpp / OpenAI-compatible local server
     llama_base_url: str = "http://localhost:8080/v1"

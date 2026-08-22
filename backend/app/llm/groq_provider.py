@@ -73,7 +73,7 @@ class GroqProvider(LLMProvider):
         return self._client
 
     def model_for(self, hint: str) -> str:
-        return self.models.get(hint, self.models.get("workhorse", "llama-3.3-70b-versatile"))
+        return self.models.get(hint, self.models.get("workhorse", "openai/gpt-oss-120b"))
 
     # -- generation --------------------------------------------------------
     async def _raw_generate(

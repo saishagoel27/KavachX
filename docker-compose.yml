@@ -53,7 +53,7 @@ services:
       # mock proposer — the demo completes either way, and the certificate records which was used.
       LLM_PROVIDER: ${LLM_PROVIDER:-groq}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
-      GROQ_MODEL_WORKHORSE: ${GROQ_MODEL_WORKHORSE:-llama-3.3-70b-versatile}
+      GROQ_MODEL_WORKHORSE: ${GROQ_MODEL_WORKHORSE:-openai/gpt-oss-120b}
       GROQ_MODEL_ROUTER: ${GROQ_MODEL_ROUTER:-llama-3.1-8b-instant}
       LLM_FALLBACK_TO_MOCK: "true"
       # The container has no gVisor runtime, so the development adapter is what is available.
