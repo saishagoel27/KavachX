@@ -29,6 +29,7 @@ from app.core.logging import (
     tenant_id_var,
     user_id_var,
 )
+from app.db.provision import provision_database
 from app.db.session import dispose_engine, get_engine
 from app.observability import metrics
 from app.orchestration import runner
@@ -68,6 +69,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         publisher_dry_run=settings.publisher_dry_run,
     )
     get_engine()
+    # Schema first, then the demo tenant: an API that boots against an empty database would
+    # otherwise answer every request with a 500 from a missing table.
+    await provision_database()
     if settings.sandbox_adapter == "dev":
         logger.warning(
             "app.dev_sandbox_active",

@@ -45,6 +45,12 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://kavachx:kavachx@localhost:5433/kavachx"
     db_echo: bool = False
     db_pool_size: int = 10
+    #: Migrate to head and seed the demo tenant during application startup, so starting the API
+    #: against an empty database cannot produce the "relation does not exist" class of 500. Both
+    #: steps are no-ops once done. Turn it off where schema changes are a deploy step of their own.
+    db_auto_provision: bool = True
+    #: How long startup provisioning waits for the database to accept connections.
+    db_startup_wait_seconds: int = 15
 
     # --- auth --------------------------------------------------------------
     jwt_secret: str = "change-me-in-production-please-use-a-long-random-value"
