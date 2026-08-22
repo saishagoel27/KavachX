@@ -6,6 +6,7 @@ const config: NextConfig = {
   reactStrictMode: true,
   // Standalone output keeps the runtime image to the server bundle plus its assets.
   output: "standalone",
+  allowedDevOrigins: ['192.168.1.22', 'localhost'],
   poweredByHeader: false,
   async headers() {
     return [
