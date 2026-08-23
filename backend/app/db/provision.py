@@ -155,6 +155,19 @@ async def ensure_schema(engine: AsyncEngine) -> str:
     return outcome
 
 
+async def ensure_local_examples() -> list[str]:
+    """Attach any ``examples/`` folder the demo project does not have yet.
+
+    The seed covers a fresh database, but not the common case: a deployment that was seeded weeks
+    ago and has just pulled in new example folders. Without this, those folders exist on disk and
+    are invisible in the repository dropdown until somebody attaches them by hand. Adding only —
+    repositories attached through the UI are never touched.
+    """
+    from app.db.examples import ensure_example_repositories
+
+    return await ensure_example_repositories()
+
+
 async def ensure_demo_seed() -> bool:
     """Seed the demo tenant when it is absent. True if this call created it."""
     from app.db.seed import demo_tenant_present, seed
@@ -198,6 +211,7 @@ async def provision_database() -> None:
                 return
             if settings.seed_demo:
                 await ensure_demo_seed()
+                await ensure_local_examples()
     except Exception as exc:
         logger.error(
             "db.provision_failed",

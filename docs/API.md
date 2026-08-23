@@ -106,12 +106,12 @@ what trip codeload's archive throttle in the first place. A cache hit performs n
 | `GET` | `/api/roles` | The full permission matrix |
 | `GET` `PATCH` | `/api/policy` | `policy:manage` to change; every change is audited with before/after |
 
-Attaching the seeded local target (`DEV_MODE` only):
+Attaching a local target (`DEV_MODE` only). Every folder under `examples/` is attached automatically — by the seed on a fresh database, and by startup provisioning on an existing one — so they are already in the repository dropdown. This endpoint is the manual equivalent, and is idempotent: `full_name` may name any folder inside `examples/`, and nothing outside it is ever accepted.
 
 ```bash
 curl -X POST "http://localhost:8000/api/projects/$PROJECT_ID/repositories" \
   -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
-  -d '{"full_name":"examples/vulnerable-demo","local_seeded":true,"default_branch":"main"}'
+  -d '{"full_name":"examples/vulnerable-web-demo","local_seeded":true,"default_branch":"main"}'
 ```
 
 ### Attaching a public GitHub repository

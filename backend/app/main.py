@@ -52,7 +52,8 @@ holds, whether an exploit reproduces, whether a patch passes, whether it stayed 
 radius, what assurance level applies, and whether a pull request may be opened.
 
 **Safety boundary.** Only repositories with verified authority — a repository the configured
-fine-grained token can push to, or the seeded local target in `DEV_MODE` — can be analysed. The sandbox is
+fine-grained token can push to, or a local target inside `examples/` in `DEV_MODE` — can be
+analysed. The sandbox is
 treated as hostile-code execution: no credentials, no network, resource-capped. Working exploits
 are gated behind `finding:read_pov` and every access is written to a hash-chained audit log.
 """

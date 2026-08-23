@@ -10,8 +10,12 @@
 
 FROM golang:1.22-bookworm
 
-# The execute phase gives the container no interface; drop the network tools the base image ships.
-RUN rm -f /usr/bin/curl /usr/bin/wget /usr/bin/nc /usr/bin/telnet 2>/dev/null || true
+# GNU time lets the adapter measure real peak RSS / CPU per exec; then drop the base image's network
+# tools (the execute phase gives the container no interface anyway).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends time \
+ && rm -rf /var/lib/apt/lists/* \
+ && rm -f /usr/bin/curl /usr/bin/wget /usr/bin/nc /usr/bin/telnet 2>/dev/null || true
 
 # The module cache and build cache live under HOME, which the adapter redirects to the writable
 # tmpfs. Pin the toolchain to the image's own version so a go.mod directive cannot trigger a

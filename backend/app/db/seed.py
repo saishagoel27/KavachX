@@ -5,7 +5,9 @@ Creates (idempotently):
 * the demo user, organisation and OWNER membership,
 * the default publish policy,
 * a project,
-* the seeded local vulnerable repository with authority recorded,
+* the seeded local vulnerable repository with authority recorded, plus every other target folder
+  under ``examples/`` (see :mod:`app.db.examples`), so the run form's repository dropdown mirrors
+  what is on disk,
 * one member per role, so RBAC behaviour is demonstrable in the UI without extra setup.
 
 This lives in the application package rather than in ``scripts/`` because two callers need it:
@@ -24,6 +26,7 @@ from sqlalchemy import func, select
 from app.audit.service import AuditService
 from app.config import settings
 from app.core.logging import get_logger
+from app.db.examples import attach_example_repositories
 from app.db.session import session_scope
 from app.models.audit import AuditAction
 from app.models.enums import RepositoryProvider, Role
@@ -180,14 +183,24 @@ async def seed() -> dict[str, object]:
                     "method": "local_seeded",
                     "path": str(demo_path),
                     "note": (
-                        "DEV_MODE seeded target inside this repository's examples/ tree. This is "
-                        "the only local path KavachX will analyse without a GitHub token."
+                        "DEV_MODE seeded target inside this repository's examples/ tree. That "
+                        "tree is the only place KavachX will analyse without a GitHub token."
                     ),
                 },
                 language_summary={"python": True},
             )
             db.add(repository)
             await db.flush()
+
+        # Every other folder under examples/ becomes a selectable target too, so the run form's
+        # dropdown mirrors what is on disk instead of listing one hand-picked demo.
+        extra_examples = await attach_example_repositories(
+            db,
+            tenant_id=organisation.id,
+            project_id=project.id,
+            actor_user_id=user.id,
+            actor_label="system:seed",
+        )
 
         audit = AuditService(db)
         await audit.record(
@@ -202,6 +215,7 @@ async def seed() -> dict[str, object]:
                 "created_user": created_user,
                 "created_org": created_org,
                 "repository": repository.full_name,
+                "examples_attached": extra_examples,
             },
             note="seed script",
         )
@@ -214,5 +228,6 @@ async def seed() -> dict[str, object]:
             "project_id": str(project.id),
             "repository_id": str(repository.id),
             "repository_path": repository.local_path,
+            "examples_attached": extra_examples,
             "role_accounts": [email for _role, email in ROLE_USERS],
         }

@@ -1,6 +1,10 @@
+<div align="center">
+
 # KavachX
 
 **Graph-grounded autonomous cyber-reasoning with proof-carrying repair.**
+
+</div>
 
 <p align="center">
   <img src="https://img.shields.io/badge/deploy-self--hosted-6E56CF?style=flat&labelColor=1f2937" alt="self-hosted" />

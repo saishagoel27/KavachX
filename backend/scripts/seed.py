@@ -37,6 +37,12 @@ async def main() -> None:
     print(f"  repository   {result['repository_id']}")
     print(f"  target path  {result['repository_path']}")
     print("")
+    attached = list(result.get("examples_attached") or [])  # type: ignore[arg-type]
+    if attached:
+        print("  Local example targets attached (now in the run-form dropdown):")
+        for full_name in attached:
+            print(f"    - {full_name}")
+        print("")
     print("  Additional role accounts (same password):")
     for email in result["role_accounts"]:  # type: ignore[union-attr]
         print(f"    - {email}")

@@ -116,8 +116,8 @@ export default function ProjectsPage() {
           <WarningNote>
             No GITHUB_TOKEN is configured on this deployment, so GitHub repositories cannot be
             attached. Set a fine-grained personal access token (Contents and Pull requests
-            read/write). In development mode you can still analyse the seeded local target below —
-            that is the only local path KavachX will accept.
+            read/write). In development mode you can still analyse the local example targets below —
+            the examples/ tree in this repository is the only local path KavachX will accept.
           </WarningNote>
         )}
       </Panel>

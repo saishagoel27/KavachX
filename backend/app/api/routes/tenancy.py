@@ -243,30 +243,47 @@ async def attach_repository(
                 "Local seeded targets are only permitted in DEV_MODE.",
                 code="LOCAL_TARGET_FORBIDDEN",
             )
-        target = settings.demo_repo_dir
         examples_root = (settings.repo_root / "examples").resolve()
-        if not target.is_dir():
-            raise BadRequest(
-                f"The seeded demo target does not exist at {target}.", code="DEMO_TARGET_MISSING"
-            )
-        if examples_root not in target.resolve().parents and target.resolve() != examples_root:
+        # Resolve which example directory to attach from the requested name, defaulting to the seeded
+        # demo. Any folder under examples/ is allowed — not just vulnerable-demo — so the web/node/
+        # fuzz demos can be attached too. A bare name is treated as examples/<name>.
+        requested = (payload.full_name or "examples/vulnerable-demo").strip().strip("/\\")
+        if requested != "examples" and not requested.startswith("examples/"):
+            requested = f"examples/{requested}"
+        target = (settings.repo_root / requested).resolve()
+        # The allowlist is the examples/ tree: a resolved path outside it (including via `..`) is
+        # refused. This is the whole authority boundary for local targets.
+        if examples_root != target and examples_root not in target.parents:
             raise RepositoryNotAuthorised(
                 "A local target must live inside this repository's examples/ directory.",
             )
+        if not target.is_dir():
+            raise BadRequest(
+                f"The local target does not exist at {target}.", code="DEMO_TARGET_MISSING"
+            )
+        # Attaching is idempotent, as it is for a public repository: the examples are attached
+        # automatically at startup, so a second attach of the same folder must return the existing
+        # row rather than adding a duplicate to the dropdown.
+        existing = await db.scalar(
+            select(Repository).where(
+                Repository.project_id == project.id, Repository.full_name == requested
+            )
+        )
+        if existing is not None:
+            return RepositoryOut.model_validate(existing)
         evidence = {
             "method": "local_seeded",
             "path": str(target),
             "examples_root": str(examples_root),
             "note": (
-                "DEV_MODE local target. Authority is granted only for the seeded vulnerable "
-                "demo inside examples/."
+                "DEV_MODE local target. Authority is granted only for targets inside examples/."
             ),
         }
         repository = Repository(
             tenant_id=principal.tenant_id,
             project_id=project.id,
             provider=RepositoryProvider.LOCAL_SEEDED.value,
-            full_name=payload.full_name or "examples/vulnerable-demo",
+            full_name=requested,
             default_branch=payload.default_branch or "main",
             local_path=str(target),
             private=True,
