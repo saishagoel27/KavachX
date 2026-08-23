@@ -544,6 +544,14 @@ export const endpoints = {
     execution_profile: string;
     max_runtime_seconds: number;
     authorisation_confirmed: boolean;
+    root_directory?: string;
+    install_command?: string;
+    build_command?: string;
+    start_command?: string;
+    target_type?: string;
+    env_text?: string;
+    env_vars?: Record<string, string>;
+    benign_requests?: Record<string, unknown>[];
   }) => api.post<Run>("/api/runs", body),
   abortRun: (id: string, reason: string) =>
     api.post<Run>(`/api/runs/${id}/abort`, { reason }),

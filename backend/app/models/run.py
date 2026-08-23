@@ -55,6 +55,11 @@ class Run(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     )
     max_runtime_seconds: Mapped[int] = mapped_column(nullable=False, default=1800)
     resource_budget: Mapped[dict[str, Any]] = mapped_column(JSONType, nullable=False, default=dict)
+    #: Operator-supplied run configuration (Vercel/Render style): root_directory, install_command,
+    #: build_command, start_command, target_type, and env_vars. Replaces run-plan guesswork; the
+    #: detector only pre-fills the form. env_vars are the target's own — see the security note where
+    #: they are injected into the sandbox.
+    run_config: Mapped[dict[str, Any]] = mapped_column(JSONType, nullable=False, default=dict)
 
     # Indexed via the explicit ix_runs_status entry in __table_args__; declaring index=True here
     # too would emit the same index twice and fail on create.

@@ -143,6 +143,24 @@ class RunContext:
     #: workload). The dynamic half of the pipeline is skipped and every surface says so, because a
     #: static-only run presented as a full one would be the central dishonesty this system avoids.
     static_only: bool = False
+    #: True when the target is executed through the language-agnostic **black-box** harness
+    #: (a non-Python request→output CLI, driven via its run command and observed from the outside)
+    #: rather than the in-process Python tracer. Findings are still proven by execution; the value
+    #: profiles / SAMHITA contract the Python path builds are not available, so those stages degrade.
+    blackbox: bool = False
+    #: Operator run configuration (root dir, install/build/start commands, target type, env vars,
+    #: benign requests), loaded from the run row at index time. Empty for auto-detected runs.
+    run_config: dict[str, Any] = field(default_factory=dict)
+    #: For a black-box run: "cli" (request→output) or "http" (long-running server).
+    blackbox_kind: str = "cli"
+    #: CLI argv template with a ``{payload}`` placeholder, or the server start argv for http.
+    blackbox_argv: list[str] = field(default_factory=list)
+    #: Working directory (root_directory) the target runs from, workspace-relative.
+    blackbox_cwd: str = "."
+    #: Target environment variables injected when the target runs (operator-supplied).
+    blackbox_env: dict[str, str] = field(default_factory=dict)
+    #: HTTP request specs ({method, path}) for the http black-box benign workload.
+    http_requests: list[dict[str, Any]] = field(default_factory=list)
     #: Aggregate metrics mirrored onto the Run row and the metric event stream.
     metrics: dict[str, Any] = field(
         default_factory=lambda: {

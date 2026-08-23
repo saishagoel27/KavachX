@@ -386,7 +386,11 @@ def _route_third_party_logging(level: int) -> None:
             library.removeHandler(handler)
         library.handlers = []
         library.propagate = True
-        if noisy in ("uvicorn.access", "sqlalchemy.engine.Engine", "watchfiles"):
+        if noisy in ("uvicorn.access", "sqlalchemy", "sqlalchemy.engine.Engine", "watchfiles"):
+            # `sqlalchemy` at INFO emits the whole ORM mapper/relationship/strategy configuration
+            # (a wall of "initialize prop …" lines) the first time models load. Keep it at WARNING;
+            # SQL echo is controlled separately by DB_ECHO, and alembic's migration logs are their
+            # own logger, so "Running upgrade …" still shows.
             library.setLevel(max(level, logging.WARNING))
         else:
             library.setLevel(level)

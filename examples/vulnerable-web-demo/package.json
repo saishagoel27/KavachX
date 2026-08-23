@@ -1,0 +1,7 @@
+{
+  "name": "vulnerable-web-demo",
+  "version": "1.0.0",
+  "description": "Deliberately vulnerable Node.js HTTP server for KavachX HTTP black-box analysis.",
+  "scripts": { "start": "node server.js" },
+  "license": "MIT"
+}

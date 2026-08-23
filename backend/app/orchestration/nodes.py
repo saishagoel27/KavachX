@@ -106,6 +106,7 @@ async def _run_row(run_id: uuid.UUID) -> dict[str, Any]:
                 "model_calls": run.model_calls,
                 "sandbox_executions": run.sandbox_executions,
                 "egress_bytes": run.egress_bytes,
+                "run_config": dict(run.run_config or {}),
             },
             "repository": {
                 "full_name": repository.full_name if repository else "",
@@ -379,6 +380,61 @@ async def node_ingest(ctx: RunContext, state: KavachState) -> KavachState:
 # ---------------------------------------------------------------------------
 # 2. probe + 3. index + 4. world model
 # ---------------------------------------------------------------------------
+def _cli_argv_template(start_cmd: str, descriptor: Any) -> list[str]:
+    """Build a CLI invocation template with a ``{payload}`` placeholder for the black-box probe.
+
+    The operator's start command is authoritative. If it does not already mark where the request
+    goes, ``--request {payload}`` is appended (the convention both demos follow). With no start
+    command, fall back to ``<interpreter> <entry_file> --request {payload}`` from the descriptor.
+    """
+    if start_cmd:
+        parts = start_cmd.split()
+        if "{payload}" not in start_cmd:
+            parts += ["--request", "{payload}"]
+        return parts
+    interpreter = {
+        "javascript": "node",
+        "typescript": "node",
+        "python": "python",
+        "go": "go",
+    }.get(getattr(descriptor, "language", ""), getattr(descriptor, "interpreter", "") or "node")
+    entry = getattr(descriptor, "entry_file", "") or ""
+    return [interpreter, entry, "--request", "{payload}"]
+
+
+async def _verify_cli_candidates(
+    ctx: RunContext, candidates: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Run each candidate request and keep only the ones that execute cleanly (the honesty gate).
+
+    A synthesised or guessed request that crashes or errors is never a valid benign baseline, so it
+    is discarded rather than counted. What survives is a workload KavachX proved the target accepts.
+    """
+    import json as _json
+
+    from app.sandbox.blackbox import observe
+
+    verified: list[dict[str, Any]] = []
+    for index, request in enumerate(candidates, start=1):
+        if not isinstance(request, dict):
+            continue
+        payload = _json.dumps(request, sort_keys=True)
+        argv = [arg.replace("{payload}", payload) for arg in ctx.blackbox_argv]
+        try:
+            obs = await observe(
+                ctx.sandbox,
+                argv=argv,
+                case_id=f"verify-{index:03d}",
+                cwd=ctx.blackbox_cwd,
+                timeout_seconds=30,
+            )
+        except Exception:
+            continue
+        if not obs.crashed:
+            verified.append({"id": f"gen-{index:03d}", "request": request})
+    return verified
+
+
 async def node_index_repo(ctx: RunContext, state: KavachState) -> KavachState:
     assert ctx.pinned is not None
 
@@ -449,32 +505,165 @@ async def node_index_repo(ctx: RunContext, state: KavachState) -> KavachState:
         confidence=0.9 if descriptor.confirmed else 0.2,
     )
 
-    ctx.benign_cases = (
-        load_benign_corpus(ctx.pinned.work / descriptor.corpus_dir) if descriptor.corpus_dir else []
-    )
-    state["benign_corpus_ref"] = sha256_json([c["request"] for c in ctx.benign_cases])
+    # -- operator run configuration (Vercel/Render style) + provisioning ---
+    run_row = await _run_row(ctx.run_id)
+    ctx.run_config = dict(run_row.get("run", {}).get("run_config") or {})
+    cfg = ctx.run_config
+    cfg_root = (str(cfg.get("root_directory") or "").strip().strip("/\\")) or "."
+    install_cmd = str(cfg.get("install_command") or "").strip()
+    build_cmd = str(cfg.get("build_command") or "").strip()
+    start_cmd = str(cfg.get("start_command") or "").strip()
+    target_type = str(cfg.get("target_type") or "auto")
+    cfg_env = {str(k): str(v) for k, v in (cfg.get("env_vars") or {}).items()}
+    benign_requests = [r for r in (cfg.get("benign_requests") or []) if isinstance(r, dict)]
 
-    # A confirmed entrypoint plus a benign corpus is what the *dynamic* half of the pipeline needs:
-    # SAMHITA observation, fuzzing, runtime observation, and execution-based validation. An
-    # arbitrary repository frequently has neither, and aborting there would mean KavachX could only
-    # ever analyse targets shaped like its own demo.
-    #
-    # So the run degrades to static-only instead: index, world model, graph/static and
-    # config/reachability discovery, and findings that stay HYPOTHESIS with an honest reason. What
-    # it must never do is present a static-only run as if it had executed anything — hence the
-    # explicit mode flag, which travels into REMAINING.md and every certificate.
-    ctx.static_only = not (descriptor.confirmed and ctx.benign_cases)
+    if (install_cmd or build_cmd) and ctx.sandbox is not None:
+        from app.sandbox.provision import provision
+
+        await ctx.emitter.phase_start(phase, "provisioning dependencies in the sandbox")
+        report = await provision(
+            ctx.sandbox,
+            commands=[("install", install_cmd), ("build", build_cmd)],
+            cwd=cfg_root,
+            env=cfg_env,
+        )
+        for step in report.steps:
+            await ctx.emitter.tool(
+                name=f"provision:{step.label}",
+                target=step.command[:80],
+                ms=step.duration_ms,
+                ok=step.ok,
+                detail=(step.output_tail[-200:] if step.output_tail else ""),
+            )
+        if not report.ok:
+            await ctx.emitter.log("; ".join(report.notes), stream="stderr", source="provision")
+
+    # -- decide execution mode: black-box (any language) vs the Python/C in-process path ---
+    lang = descriptor.language
+    kind = descriptor.project_kind
+    is_http = target_type == "http" or (
+        target_type == "auto" and kind == "web_service" and bool(start_cmd)
+    )
+    is_cli_bb = not is_http and (
+        target_type == "cli"
+        or (lang not in ("python", "c") and lang != "unknown" and bool(start_cmd or descriptor.run_command))
+    )
+
+    root_path = ctx.pinned.work / cfg_root if cfg_root != "." else ctx.pinned.work
+
+    if is_http and start_cmd:
+        from app.analysis.workload import discover_http_routes, synthesize_http_requests
+
+        ctx.blackbox = True
+        ctx.blackbox_kind = "http"
+        ctx.blackbox_argv = start_cmd.split()
+        ctx.blackbox_cwd = cfg_root
+        ctx.blackbox_env = cfg_env
+        if benign_requests:
+            ctx.http_requests = benign_requests
+            source = "operator-supplied"
+        else:
+            # Fully automatic: derive the workload from the target's own routes.
+            routes = discover_http_routes(root_path)
+            ctx.http_requests = synthesize_http_requests(root_path, routes, descriptor.asset_dir)
+            source = f"{len(routes)} route(s) auto-discovered from source"
+        ctx.benign_cases = []
+        state["benign_corpus_ref"] = sha256_json(ctx.http_requests)
+        await ctx.emitter.thought(
+            agent="WORKLOAD",
+            hypothesis="A benign HTTP workload can be derived from the target's routes.",
+            evidence=[source, f"{len(ctx.http_requests)} candidate request(s)"],
+            decision="Generated the HTTP workload; each request is verified against the live server.",
+            confidence=0.85,
+        )
+    elif is_cli_bb and start_cmd:
+        from app.analysis.workload import synthesize_cli_candidates
+
+        ctx.blackbox = True
+        ctx.blackbox_kind = "cli"
+        ctx.blackbox_argv = _cli_argv_template(start_cmd, descriptor)
+        ctx.blackbox_cwd = cfg_root
+        ctx.blackbox_env = cfg_env
+        if benign_requests:
+            candidates = benign_requests
+            source = "operator-supplied"
+        else:
+            # Fully automatic: synthesise candidate requests from the CLI's dispatch ops and fields.
+            candidates = synthesize_cli_candidates(
+                root_path, descriptor.entry_file, descriptor.asset_dir
+            )
+            source = "auto-synthesised from the CLI's dispatch ops and request fields"
+        # Verify by execution — only requests that actually run cleanly become the benign baseline.
+        ctx.benign_cases = await _verify_cli_candidates(ctx, candidates)
+        state["benign_corpus_ref"] = sha256_json([c["request"] for c in ctx.benign_cases])
+        await ctx.emitter.thought(
+            agent="WORKLOAD",
+            hypothesis="A benign CLI workload can be generated and verified by execution.",
+            evidence=[
+                source,
+                f"{len(candidates)} candidate(s)",
+                f"{len(ctx.benign_cases)} verified benign by execution",
+            ],
+            decision="Only requests that executed cleanly are kept — a guessed input that errors "
+            "is never treated as a valid baseline.",
+            confidence=0.85,
+        )
+    else:
+        # Python/C in-process path: benign corpus from the repo, or the config requests as a
+        # fallback when the repo shipped none.
+        ctx.benign_cases = (
+            load_benign_corpus(ctx.pinned.work / descriptor.corpus_dir)
+            if descriptor.corpus_dir
+            else []
+        )
+        if not ctx.benign_cases and benign_requests:
+            ctx.benign_cases = [
+                {"id": f"cfg-{i:03d}", "request": r} for i, r in enumerate(benign_requests, start=1)
+            ]
+        state["benign_corpus_ref"] = sha256_json([c["request"] for c in ctx.benign_cases])
+
+    # The *dynamic* half needs either an executable black-box target with a benign workload, or a
+    # confirmed Python/C entrypoint with a benign corpus. Otherwise the run degrades to static-only
+    # honestly — it must never present a static-only run as if it had executed anything.
+    if ctx.blackbox and ctx.blackbox_kind == "http":
+        ctx.static_only = not bool(ctx.blackbox_argv and ctx.http_requests)
+    elif ctx.blackbox:
+        ctx.static_only = not bool(ctx.blackbox_argv and ctx.benign_cases)
+    else:
+        ctx.static_only = not (descriptor.confirmed and ctx.benign_cases)
     state["mode"] = "static_only" if ctx.static_only else "full"
 
     if ctx.static_only:
         reasons: list[str] = []
-        if not descriptor.confirmed:
-            reasons.append("no entrypoint could be confirmed on disk")
-        if not ctx.benign_cases:
-            reasons.append(
-                f"no benign workload was found at "
-                f"{descriptor.corpus_dir or 'corpus/benign'} to observe"
-            )
+        if target_type in ("cli", "http"):
+            # The operator asked for a black-box run but the pieces to drive it are missing.
+            if not start_cmd:
+                reasons.append("no start command was configured for the target")
+            if target_type == "http" and not benign_requests:
+                reasons.append("no benign HTTP requests were provided to drive the server")
+            if target_type == "cli" and not benign_requests:
+                reasons.append("no benign requests were provided to drive the CLI")
+            if not reasons:
+                reasons.append("the configured black-box target could not be prepared")
+        else:
+            if not descriptor.confirmed:
+                # The run-plan detector gives the honest "why" for a non-executable target (a web
+                # service, a smart contract, a library, or a language with no tracing harness);
+                # otherwise it is simply that no entrypoint could be confirmed on disk.
+                if descriptor.project_kind in ("web_service", "smart_contract", "library") or (
+                    descriptor.language not in ("python", "c") and descriptor.language != "unknown"
+                ):
+                    reasons.append(descriptor.dynamic_reason)
+                else:
+                    reasons.append("no entrypoint could be confirmed on disk")
+                if descriptor.run_command:
+                    reasons.append(f"detected run command: {' '.join(descriptor.run_command)}")
+            if not ctx.benign_cases:
+                reasons.append(
+                    "no benign workload was found at "
+                    f"{descriptor.corpus_dir or 'corpus/benign'} to observe (or configure a "
+                    "target type + benign requests to run it black-box)"
+                )
         detail = "; ".join(reasons)
         state["static_only_reason"] = detail
         # Persisted, not just streamed: whoever opens this run later must see the qualifier too.
@@ -595,6 +784,29 @@ async def node_contract_synthesis(ctx: RunContext, state: KavachState) -> Kavach
         state["samhita"] = []
         return state
 
+    if ctx.blackbox:
+        # A black-box target is observed from the outside, so there are no per-function value
+        # profiles to build a SAMHITA contract from. Findings are proven by observed effect
+        # (a leaked canary, an echoed marker, a crash) rather than a violated clause.
+        from app.samhita.engine import SamhitaResult
+
+        await ctx.emitter.phase_start(phase, f"skipped — {ctx.blackbox_kind} black-box target")
+        await ctx.emitter.thought(
+            agent="SAMHITA",
+            hypothesis="A behavioural contract can be reconstructed from in-process observation.",
+            evidence=[f"{ctx.blackbox_kind} black-box target: observed from the outside only"],
+            decision=(
+                "No SAMHITA contract for a black-box target — value profiles need an in-process "
+                "tracer. Findings are proven by an observed effect instead of a violated clause."
+            ),
+            confidence=1.0,
+        )
+        await ctx.emitter.phase_done(phase, "black-box mode: contract synthesis not applicable")
+        await _mark_phase(ctx, phase, "completed")
+        ctx.samhita = SamhitaResult()
+        state["samhita"] = []
+        return state
+
     await ctx.emitter.phase_start(phase, "observing the benign workload")
 
     engine = SamhitaEngine(
@@ -710,9 +922,9 @@ async def node_discovery_fanout(ctx: RunContext, state: KavachState) -> KavachSt
     seeds = [c["request"] for c in ctx.benign_cases]
     fuzz_budget = {"quick": 60, "standard": 160, "deep": 400}.get(ctx.analysis_profile, 160)
 
-    # No channel blocks another. Fuzzing and runtime observation both require an executable
-    # entrypoint, so in static-only mode they are not run at all — and their absence is recorded
-    # as a coverage gap rather than passed off as a clean sweep.
+    # No channel blocks another. Fuzzing and runtime observation both use the Python/C in-process
+    # harness, so in static-only mode they are not run at all — and in black-box mode the adaptive
+    # black-box probe in the validation node does the executable discovery instead.
     channels = [
         static_channel.run(
             model=ctx.world_model,
@@ -722,7 +934,7 @@ async def node_discovery_fanout(ctx: RunContext, state: KavachState) -> KavachSt
         ),
         config_channel.run(model=ctx.world_model, descriptor=ctx.descriptor),
     ]
-    if not ctx.static_only:
+    if not ctx.static_only and not ctx.blackbox:
         channels.extend(
             [
                 fuzz_channel.run(
@@ -818,6 +1030,123 @@ async def node_discovery_fanout(ctx: RunContext, state: KavachState) -> KavachSt
 # ---------------------------------------------------------------------------
 # 7. validation
 # ---------------------------------------------------------------------------
+async def _node_validate_blackbox(ctx: RunContext, state: KavachState, phase: str) -> KavachState:
+    """Validate a black-box target by adaptively fuzzing it and recording reproduced findings.
+
+    Discovery and validation happen together here: the probe learns the interface from the benign
+    workload, mutates it with exploit oracles, and confirms only on an observed effect. Each
+    confirmed vulnerability becomes a VALIDATED finding, identical downstream to the Python path.
+    """
+    assert ctx.sandbox is not None
+    await ctx.emitter.phase_start(phase, f"black-box validation — driving the {ctx.blackbox_kind} target")
+
+    try:
+        if ctx.blackbox_kind == "http":
+            from app.sandbox.http_blackbox import probe_http
+
+            findings = await probe_http(
+                start_argv=ctx.blackbox_argv,
+                workspace=ctx.pinned.work,
+                http_requests=ctx.http_requests,
+                cwd=ctx.blackbox_cwd,
+                env=ctx.blackbox_env,
+            )
+        else:
+            from app.analysis.blackbox_probe import probe as cli_probe
+
+            findings = await cli_probe(
+                ctx.sandbox,
+                argv_template=ctx.blackbox_argv,
+                benign_cases=ctx.benign_cases,
+            )
+    except Exception as exc:
+        await ctx.emitter.phase_failed(phase, f"black-box validation error: {str(exc)[:200]}")
+        await _mark_phase(ctx, phase, "failed")
+        state["errors"] = [
+            *state.get("errors", []),
+            {"phase": phase, "error": f"blackbox: {type(exc).__name__}: {exc}", "at": now_iso()},
+        ]
+        return state
+
+    validated: list[dict[str, Any]] = []
+    for i, bf in enumerate(findings, start=1):
+        handle = f"V{i:02d}"
+        outcome = bf.outcome
+        async with session_scope() as db:
+            finding = Finding(
+                tenant_id=ctx.tenant_id,
+                run_id=ctx.run_id,
+                hypothesis_id=None,
+                handle=handle,
+                title=bf.description[:400],
+                state=FindingState.VALIDATED.value,
+                severity=bf.severity,
+                cwe=bf.cwe,
+                source_channel="blackbox",
+                violated_clause_id="",
+                location=bf.location,
+                reachable=True,
+                reachability_score=1.0,
+                reproduced=True,
+                reproduction_count=outcome.reproduction_count,
+                exit_code=outcome.exit_code,
+                sanitizer_signal=outcome.sanitizer_signal[:200],
+                contract_violation=outcome.contract_violation[:400],
+                input_hash=outcome.input_hash,
+                output_hash=outcome.output_hash,
+                trace_hash=outcome.trace_hash,
+                coverage_percent=0.0,
+                pov_payload=outcome.pov_payload,
+                pov_kind=outcome.pov_kind,
+                pov_hash=sha256_text(outcome.pov_payload) if outcome.pov_payload else "",
+                evidence_refs=[],
+                validated_at=datetime.now(timezone.utc),
+                status_label="VALIDATED",
+            )
+            db.add(finding)
+            await db.flush()
+            finding_id = finding.id
+
+        ctx.findings[handle] = FindingWork(
+            handle=handle,
+            hypothesis_handle=handle,
+            finding_id=finding_id,
+            outcome=outcome,
+            channels=["blackbox"],
+            plan={},
+            coverage_before=0.0,
+        )
+        await ctx.emitter.finding(
+            handle=handle,
+            state="validated",
+            severity=bf.severity,
+            reachable=True,
+            title=bf.description[:200],
+        )
+        await ctx.emitter.thought(
+            agent="RED TEAM (black-box)",
+            hypothesis=bf.description[:300],
+            evidence=[outcome.detail[:220], f"reproduced {outcome.reproduction_count}x", bf.cwe],
+            decision=f"CONFIRMED by observed effect — {bf.cwe}",
+            confidence=0.97,
+        )
+        validated.append({"handle": handle, "cwe": bf.cwe, "location": bf.location})
+
+    state["validated"] = validated
+    state["downgraded"] = []
+    if findings:
+        await ctx.emitter.phase_done(
+            phase, f"{len(findings)} vulnerability(ies) reproduced black-box"
+        )
+    else:
+        await ctx.emitter.phase_blocked(
+            phase, "no reproducible vulnerability found by black-box fuzzing"
+        )
+    await _mark_phase(ctx, phase, "completed")
+    await _emit_metrics(ctx)
+    return state
+
+
 async def node_validate(ctx: RunContext, state: KavachState) -> KavachState:
     assert ctx.sandbox is not None and ctx.descriptor is not None and ctx.pinned is not None
     samhita = ctx.samhita
@@ -828,6 +1157,9 @@ async def node_validate(ctx: RunContext, state: KavachState) -> KavachState:
 
     phase = Phase.VALIDATION.value
     await _set_phase(ctx, phase)
+
+    if ctx.blackbox:
+        return await _node_validate_blackbox(ctx, state, phase)
 
     if ctx.static_only:
         await ctx.emitter.phase_start(phase, "skipped — the target cannot be executed")
@@ -1119,6 +1451,16 @@ async def node_shield(ctx: RunContext, state: KavachState) -> KavachState:
         await _mark_phase(ctx, phase, "completed")
         return state
 
+    if ctx.blackbox:
+        # Runtime shields are derived by the Python in-process harness; a black-box target is only
+        # observed from the outside, so there is no shield-insertion point here.
+        await ctx.emitter.phase_start(phase, "skipped — black-box target")
+        await ctx.emitter.phase_done(
+            phase, "runtime shielding is not available for a black-box target"
+        )
+        await _mark_phase(ctx, phase, "completed")
+        return state
+
     await ctx.emitter.phase_start(phase, "synthesising reversible mitigations")
     service = ShieldService(
         sandbox=ctx.sandbox, descriptor=ctx.descriptor, workspace=ctx.pinned.work
@@ -1226,6 +1568,31 @@ async def node_root_cause(ctx: RunContext, state: KavachState) -> KavachState:
     if not ctx.findings:
         await ctx.emitter.phase_start(phase, "nothing to analyse")
         await ctx.emitter.phase_done(phase, "skipped")
+        await _mark_phase(ctx, phase, "completed")
+        return state
+
+    if ctx.blackbox:
+        # A black-box target is observed only from the outside — the source location cannot be
+        # traced. Record the observed request-interface location, unverified, and skip blast radius.
+        from app.patching.rootcause import RootCause
+
+        await ctx.emitter.phase_start(phase, "black-box target — recording the observed location")
+        for _handle, work in sorted(ctx.findings.items()):
+            oc = work.outcome
+            location = getattr(oc, "crash_site", "") or ""
+            summary = (
+                "Observed black-box via the request interface; the exact source location was not "
+                "traced (no in-process harness for this target). Confirmed by reproduced effect."
+            )
+            work.root_cause = RootCause(location=location, summary=summary, verified=False)
+            async with session_scope() as db:
+                finding = await db.get(Finding, work.finding_id)
+                if finding is not None:
+                    finding.root_cause_location = location[:400]
+                    finding.root_cause_summary = summary
+                    finding.root_cause_verified = False
+                    finding.root_cause_chain = [oc.detail[:200]] if getattr(oc, "detail", "") else []
+        await ctx.emitter.phase_done(phase, "recorded observed locations (source not traced)")
         await _mark_phase(ctx, phase, "completed")
         return state
 
@@ -1340,6 +1707,35 @@ async def node_patch_and_gauntlet(ctx: RunContext, state: KavachState) -> Kavach
         await _mark_phase(ctx, phase, "completed")
         for skipped in (Phase.GAUNTLET.value,):
             await _mark_phase(ctx, skipped, "completed")
+        return state
+
+    if ctx.blackbox:
+        # The vulnerabilities are confirmed by observed effect, but synthesising a source patch
+        # needs source-level analysis the black-box path deliberately does not do. Mark each finding
+        # for manual remediation (its reproduced exploit is the regression test) rather than
+        # fabricating a patch that was never verified.
+        await ctx.emitter.phase_start(phase, "black-box target — automated repair not available")
+        for handle, work in sorted(ctx.findings.items()):
+            work.repair_blocked_reason = (
+                "Black-box target: confirmed by observed effect, but automated patch synthesis "
+                "needs source-level analysis (an in-process harness). Remediate manually — the "
+                "reproduced exploit is the regression test."
+            )
+            await ctx.emitter.thought(
+                agent="BLUE TEAM",
+                hypothesis=f"A minimal patch can be synthesised for {handle}.",
+                evidence=[work.outcome.detail[:200] if work.outcome else ""],
+                decision=(
+                    "Repair not attempted for a black-box target — the finding is confirmed and "
+                    "handed off for manual remediation."
+                ),
+                confidence=1.0,
+            )
+        await ctx.emitter.phase_done(phase, "black-box: findings confirmed; manual remediation")
+        await _mark_phase(ctx, phase, "completed")
+        await _mark_phase(ctx, Phase.GAUNTLET.value, "completed")
+        state["patches"] = []
+        state["gauntlet"] = {}
         return state
 
     samhita = ctx.samhita if ctx.samhita is not None else _empty_samhita()

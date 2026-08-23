@@ -57,6 +57,29 @@ def _short_code() -> str:
     return secrets.token_hex(2).upper()
 
 
+def _build_run_config(payload: RunCreate) -> dict[str, Any]:
+    """Assemble the operator's Vercel/Render-style run configuration.
+
+    A pasted ``.env`` blob is parsed here (with the shared parser) and merged under any individually
+    supplied variables, so ``env_vars`` wins on a key present in both.
+    """
+    from app.core.dotenv import parse_dotenv
+
+    env: dict[str, str] = {}
+    if payload.env_text:
+        env.update(parse_dotenv(payload.env_text))
+    env.update(payload.env_vars or {})
+    return {
+        "root_directory": payload.root_directory.strip(),
+        "install_command": payload.install_command.strip(),
+        "build_command": payload.build_command.strip(),
+        "start_command": payload.start_command.strip(),
+        "target_type": payload.target_type or "auto",
+        "env_vars": env,
+        "benign_requests": [r for r in payload.benign_requests if isinstance(r, dict)],
+    }
+
+
 async def _run_out(db: AsyncSession, run: Run) -> RunOut:
     model = RunOut.model_validate(run)
     repository = await db.get(Repository, run.repository_id)
@@ -106,6 +129,7 @@ async def create_run(
         execution_profile=payload.execution_profile.value,
         max_runtime_seconds=payload.max_runtime_seconds,
         resource_budget=payload.resource_budget,
+        run_config=_build_run_config(payload),
         status=RunStatus.QUEUED.value,
         requested_by=principal.user_id,
     )

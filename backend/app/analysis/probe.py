@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from app.analysis.framework import detect_run_plan
 from app.analysis.world_model import WorldModel
 from app.core.logging import get_logger
 
@@ -45,6 +46,14 @@ class TargetDescriptor:
     confirmed: bool = False
     confirmation_notes: list[str] = field(default_factory=list)
     interface_hypotheses: list[dict[str, Any]] = field(default_factory=list)
+    #: Run-plan facts derived from the target's own manifests + README (see analysis.framework).
+    project_kind: str = "unknown"
+    frameworks: list[str] = field(default_factory=list)
+    install_command: list[str] = field(default_factory=list)
+    run_command: list[str] = field(default_factory=list)
+    readme_commands: list[str] = field(default_factory=list)
+    #: Why this target can (or cannot) be executed and observed by KavachX.
+    dynamic_reason: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -62,6 +71,12 @@ class TargetDescriptor:
             "confirmed": self.confirmed,
             "confirmation_notes": self.confirmation_notes,
             "interface_hypotheses": self.interface_hypotheses,
+            "project_kind": self.project_kind,
+            "frameworks": self.frameworks,
+            "install_command": self.install_command,
+            "run_command": self.run_command,
+            "readme_commands": self.readme_commands,
+            "dynamic_reason": self.dynamic_reason,
         }
 
     def argv_for(self, payload: str) -> list[str]:
@@ -108,6 +123,23 @@ def confirm_descriptor(
         descriptor.language = "c"
     elif languages.get("javascript"):
         descriptor.language = "javascript"
+
+    # -- run plan (framework, kind, build/run/test) from the target's own manifests + README ------
+    # This is what lets the Probe understand a Node/Rust/Go/web project instead of assuming a
+    # Python main.py. It never *forces* execution: the harness gate below still decides that.
+    plan = detect_run_plan(root)
+    descriptor.project_kind = plan.kind
+    descriptor.frameworks = plan.frameworks
+    descriptor.install_command = plan.install_command
+    descriptor.run_command = plan.run_command
+    descriptor.readme_commands = plan.readme_commands
+    descriptor.dynamic_reason = plan.reason
+    # Prefer the manifest-derived language when the file index could not classify it (e.g. Rust/Go).
+    if descriptor.language == "python" and not languages.get("python") and plan.language != "unknown":
+        descriptor.language = plan.language
+    for note in plan.evidence:
+        notes.append(note)
+    notes.append(plan.reason)
 
     # -- source root -------------------------------------------------------
     for candidate in SOURCE_ROOT_CANDIDATES:
@@ -179,7 +211,11 @@ def confirm_descriptor(
             )
             break
     if not descriptor.corpus_dir:
-        notes.append("no benign corpus found; SAMHITA will have nothing to observe")
+        notes.append(
+            "no benign corpus found (looked in corpus/benign, corpus, tests/corpus, "
+            "fixtures/benign, examples/benign); SAMHITA and differential replay have nothing "
+            "to observe"
+        )
 
     for candidate in ASSET_CANDIDATES:
         if (root / candidate).is_dir():
@@ -187,11 +223,16 @@ def confirm_descriptor(
             break
 
     # -- build / test ------------------------------------------------------
-    if (root / "build.sh").is_file():
+    # Prefer commands the project declares about itself; fall back to filesystem heuristics.
+    if plan.build_command:
+        descriptor.build_command = plan.build_command
+    elif (root / "build.sh").is_file():
         descriptor.build_command = ["bash", "build.sh"]
     elif (root / "Makefile").is_file():
         descriptor.build_command = ["make", "build"]
-    if (root / "tests").is_dir():
+    if plan.test_command:
+        descriptor.test_command = plan.test_command
+    elif (root / "tests").is_dir():
         descriptor.test_command = ["python", "-m", "pytest", "tests", "-q"]
 
     descriptor.confirmation_notes = notes

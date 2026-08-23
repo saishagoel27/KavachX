@@ -38,13 +38,13 @@ const EXECUTION_PROFILES = [
   {
     id: "dev_local",
     label: "Development (local subprocess)",
-    detail: "NOT an isolation boundary. Credentials are withheld and Python targets run under an in-process network guard, but there is no kernel-level confinement.",
+    detail: "NOT an isolation boundary. The target runs as a subprocess on the HOST and uses the host's runtime (your installed node/python) — only workspace files and installed packages (node_modules) are per-run isolated, not the runtime or OS. Credentials are withheld and Python targets run under an in-process network guard, but there is no kernel-level confinement.",
     safe: false,
   },
   {
     id: "gvisor",
     label: "gVisor (runsc)",
-    detail: "Userspace kernel, no network interface, read-only root, dropped capabilities, seccomp. Requires Docker with the runsc runtime registered.",
+    detail: "Runs inside a container — the runtime comes from the sandbox image, not your host. Userspace kernel, no network interface, read-only root, dropped capabilities, seccomp. Requires Docker (Linux/WSL2) with the runsc runtime registered.",
     safe: true,
   },
   {
@@ -54,6 +54,29 @@ const EXECUTION_PROFILES = [
     safe: true,
   },
 ];
+
+// Quick client-side count of KEY=VALUE lines in a pasted .env (the server does the real parse).
+function countEnvLines(text: string): number {
+  return text
+    .split("\n")
+    .filter((line) => /^\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*\s*=/.test(line)).length;
+}
+
+// Parse the benign-requests box: one JSON object per line (a CLI request, or {method, path}).
+function parseBenignRequests(text: string): Record<string, unknown>[] {
+  const out: Record<string, unknown>[] = [];
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) out.push(parsed);
+    } catch {
+      // ignore malformed lines — the count hint shows the user how many parsed
+    }
+  }
+  return out;
+}
 
 export default function NewRunPage() {
   const router = useRouter();
@@ -71,6 +94,16 @@ export default function NewRunPage() {
   const [confirmed, setConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
+
+  // Vercel/Render-style run configuration (optional; blank means auto-detect at ingest).
+  const [rootDirectory, setRootDirectory] = useState("");
+  const [installCommand, setInstallCommand] = useState("");
+  const [buildCommand, setBuildCommand] = useState("");
+  const [startCommand, setStartCommand] = useState("");
+  const [targetType, setTargetType] = useState("auto");
+  const [envText, setEnvText] = useState("");
+  const [envRows, setEnvRows] = useState<{ key: string; value: string }[]>([]);
+  const [benignText, setBenignText] = useState("");
 
   useEffect(() => {
     void (async () => {
@@ -112,6 +145,9 @@ export default function NewRunPage() {
     setBusy(true);
     setError(null);
     try {
+      const env_vars = Object.fromEntries(
+        envRows.filter((r) => r.key.trim()).map((r) => [r.key.trim(), r.value]),
+      );
       const run = await endpoints.createRun({
         repository_id: repositoryId,
         branch,
@@ -120,6 +156,14 @@ export default function NewRunPage() {
         execution_profile: executionProfile,
         max_runtime_seconds: maxRuntime,
         authorisation_confirmed: confirmed,
+        root_directory: rootDirectory.trim(),
+        install_command: installCommand.trim(),
+        build_command: buildCommand.trim(),
+        start_command: startCommand.trim(),
+        target_type: targetType,
+        env_text: envText,
+        env_vars,
+        benign_requests: parseBenignRequests(benignText),
       });
       router.push(`/console/runs/${run.id}`);
     } catch (exc) {
@@ -263,6 +307,186 @@ export default function NewRunPage() {
             </div>
           </Panel>
 
+          <Panel
+            title="Run configuration"
+            subtitle="How to install, run and reach the target — like Vercel/Render. Blank = auto-detect."
+          >
+            <div className="space-y-4">
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div>
+                  <label className="label" htmlFor="root_directory">
+                    Root directory
+                  </label>
+                  <input
+                    id="root_directory"
+                    value={rootDirectory}
+                    onChange={(e) => setRootDirectory(e.target.value)}
+                    className="field font-mono"
+                    placeholder="blank = repo root (e.g. services/api)"
+                  />
+                </div>
+                <div>
+                  <label className="label" htmlFor="target_type">
+                    Target type
+                  </label>
+                  <select
+                    id="target_type"
+                    value={targetType}
+                    onChange={(e) => setTargetType(e.target.value)}
+                    className="field"
+                  >
+                    <option value="auto">Auto-detect</option>
+                    <option value="cli">CLI — request → output</option>
+                    <option value="http">Web server — driven over HTTP</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="label" htmlFor="install_command">
+                  Install command
+                </label>
+                <input
+                  id="install_command"
+                  value={installCommand}
+                  onChange={(e) => setInstallCommand(e.target.value)}
+                  className="field font-mono"
+                  placeholder="npm install   ·   pip install -r requirements.txt   ·   cargo build"
+                />
+              </div>
+
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div>
+                  <label className="label" htmlFor="build_command">
+                    Build command <span className="text-foreground-faint">(optional)</span>
+                  </label>
+                  <input
+                    id="build_command"
+                    value={buildCommand}
+                    onChange={(e) => setBuildCommand(e.target.value)}
+                    className="field font-mono"
+                    placeholder="npm run build"
+                  />
+                </div>
+                <div>
+                  <label className="label" htmlFor="start_command">
+                    Start / run command
+                  </label>
+                  <input
+                    id="start_command"
+                    value={startCommand}
+                    onChange={(e) => setStartCommand(e.target.value)}
+                    className="field font-mono"
+                    placeholder={
+                      targetType === "http"
+                        ? "npm start   ·   uvicorn app:app"
+                        : "node cli.js --request {payload}"
+                    }
+                  />
+                </div>
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between">
+                  <label className="label" htmlFor="benign_requests">
+                    Benign requests{" "}
+                    <span className="text-foreground-faint">(optional — auto-generated if blank)</span>
+                  </label>
+                  <span className="font-mono text-[10px] text-foreground-faint">
+                    {parseBenignRequests(benignText).length} parsed
+                  </span>
+                </div>
+                <textarea
+                  id="benign_requests"
+                  value={benignText}
+                  onChange={(e) => setBenignText(e.target.value)}
+                  className="field font-mono min-h-[80px]"
+                  placeholder={
+                    targetType === "http"
+                      ? "leave blank — KavachX discovers your routes and generates requests\nor seed one per line: {\"method\":\"GET\",\"path\":\"/export?name=report\"}"
+                      : "leave blank — KavachX derives requests from the CLI's ops and fields\nor seed one per line: {\"op\":\"export\",\"name\":\"report\"}"
+                  }
+                  spellCheck={false}
+                />
+                <p className="mt-1 text-[11px] leading-4 text-foreground-faint">
+                  Leave blank for fully automatic analysis: KavachX discovers the interface
+                  (routes / CLI ops), generates candidate requests, verifies each by running it, and
+                  fuzzes what works. Add lines only to seed or reach auth-gated paths.
+                </p>
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between">
+                  <label className="label" htmlFor="env_text">
+                    Environment variables
+                  </label>
+                  <span className="font-mono text-[10px] text-foreground-faint">
+                    {countEnvLines(envText) + envRows.filter((r) => r.key.trim()).length} variable(s)
+                  </span>
+                </div>
+                <textarea
+                  id="env_text"
+                  value={envText}
+                  onChange={(e) => setEnvText(e.target.value)}
+                  className="field font-mono min-h-[96px]"
+                  placeholder={"Paste a .env to bulk-add:\nDATABASE_URL=postgres://...\nAPI_KEY=sk-..."}
+                  spellCheck={false}
+                />
+                <p className="mt-1 text-[11px] leading-4 text-foreground-faint">
+                  Injected into the target when it runs so it can start. They are the target&apos;s
+                  own secrets — see the isolation note; do not paste anything you would not run in
+                  the sandbox.
+                </p>
+
+                {envRows.length > 0 && (
+                  <div className="mt-2 space-y-2">
+                    {envRows.map((row, i) => (
+                      <div key={i} className="flex gap-2">
+                        <input
+                          value={row.key}
+                          onChange={(e) =>
+                            setEnvRows((rows) =>
+                              rows.map((r, idx) => (idx === i ? { ...r, key: e.target.value } : r)),
+                            )
+                          }
+                          className="field font-mono"
+                          placeholder="KEY"
+                        />
+                        <input
+                          value={row.value}
+                          onChange={(e) =>
+                            setEnvRows((rows) =>
+                              rows.map((r, idx) =>
+                                idx === i ? { ...r, value: e.target.value } : r,
+                              ),
+                            )
+                          }
+                          className="field font-mono"
+                          placeholder="value"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setEnvRows((rows) => rows.filter((_, idx) => idx !== i))}
+                          className="btn-ghost px-2"
+                          aria-label="Remove variable"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setEnvRows((rows) => [...rows, { key: "", value: "" }])}
+                  className="btn-secondary mt-2 text-xs"
+                >
+                  + Add variable
+                </button>
+              </div>
+            </div>
+          </Panel>
+
           <Panel title="Analysis profile">
             <div className="space-y-2">
               {ANALYSIS_PROFILES.map((profile) => (
@@ -331,9 +555,13 @@ export default function NewRunPage() {
             {chosenExecution && !chosenExecution.safe && (
               <div className="mt-3">
                 <WarningNote>
-                  You have selected the development adapter. It executes the target as a
-                  subprocess of the backend on the host filesystem. Use it only for code you
-                  already trust — such as the seeded demo target.
+                  You have selected the development adapter. It executes the target as a subprocess
+                  <strong> on this host, using the host&apos;s own runtime</strong> (your installed
+                  node/python) — the workspace files and installed packages are isolated per run, but
+                  the runtime and OS are <strong>not</strong>. For a sandbox that provides its own
+                  runtime and kernel-level confinement, use <strong>gVisor</strong> (Linux/WSL2).
+                  Use the dev adapter only for code you already trust — such as the seeded demo
+                  targets.
                 </WarningNote>
               </div>
             )}

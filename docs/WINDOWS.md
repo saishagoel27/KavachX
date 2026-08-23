@@ -94,6 +94,22 @@ synchronous `subprocess` module (`app/sandbox/spawn.py`), which behaves identica
 Selector and uvloop and keeps the wall-clock timeout and `taskkill /F /T` tree kill.
 `test_sandbox_executes_on_a_selector_event_loop` drives the adapter on the loop that used to fail.
 
+### Runtime isolation — the dev adapter uses your HOST runtime
+
+On the `dev` adapter the target runs as a **subprocess on this host**, invoked with the **host's own
+runtime** — the `node`/`python` on your `PATH`. There is no separate runtime inside the sandbox on
+this path. What *is* isolated per run:
+
+- the **workspace** — a pinned, hashed copy of the source (never your original tree), and
+- **installed packages** — provisioning's `npm install` / `pip install` land in that workspace
+  (`node_modules` etc.), not your global system.
+
+What is **not** isolated on `dev`: the **runtime binaries**, the OS, and the filesystem — it is a
+host process. So "download node and run it inside the sandbox" only happens on the **gVisor**
+(or Firecracker) adapter, where the runtime comes from the container/VM **image**, not your host.
+gVisor needs Linux/WSL2 (see "The stronger sandbox on Windows" below); until then, a Windows dev run
+uses your host runtime by design, and the console labels it `SANDBOX DEV · DEV ONLY`.
+
 ### Resource limits
 
 `resource.setrlimit` does not exist on Windows, so the dev adapter cannot cap address space, CPU

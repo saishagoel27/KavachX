@@ -1,0 +1,8 @@
+{
+  "name": "vulnerable-node-demo",
+  "version": "1.0.0",
+  "description": "Deliberately vulnerable Node.js CLI target for KavachX black-box analysis.",
+  "bin": { "reportsvc": "cli.js" },
+  "scripts": { "demo": "node cli.js" },
+  "license": "MIT"
+}

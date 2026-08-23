@@ -2,6 +2,7 @@
 
 import { Activity, Play } from "lucide-react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import { ApiError, endpoints, type Run } from "@/lib/api";
@@ -17,6 +18,7 @@ const STATUS_TONE: Record<string, "verified" | "accent" | "refuted" | "warn" | "
 };
 
 export default function RunsPage() {
+  const router = useRouter();
   const [runs, setRuns] = useState<Run[] | null>(null);
   const [error, setError] = useState<ApiError | null>(null);
 
@@ -75,9 +77,17 @@ export default function RunsPage() {
               </thead>
               <tbody className="divide-y divide-border">
                 {runs.map((run) => (
-                  <tr key={run.id} className="hover:bg-surface-high">
+                  <tr
+                    key={run.id}
+                    onClick={() => router.push(`/console/runs/${run.id}`)}
+                    className="cursor-pointer hover:bg-surface-high"
+                  >
                     <td className="px-4 py-2.5">
-                      <Link href={`/console/runs/${run.id}`} className="font-mono text-sm font-bold text-accent hover:underline">
+                      <Link
+                        href={`/console/runs/${run.id}`}
+                        onClick={(e) => e.stopPropagation()}
+                        className="font-mono text-sm font-bold text-accent hover:underline"
+                      >
                         {run.short_code}
                       </Link>
                     </td>

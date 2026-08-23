@@ -239,6 +239,34 @@ class RunCreate(BaseModel):
     #: The caller must affirm authorisation. Recorded in the audit log.
     authorisation_confirmed: bool = False
 
+    # -- Vercel/Render-style run configuration (optional; the detector pre-fills the form) --------
+    #: Subdirectory the target lives in (monorepo). Blank = repository root.
+    root_directory: str = Field(default="", max_length=400)
+    #: Shell command that installs dependencies before observation (e.g. ``npm install``).
+    install_command: str = Field(default="", max_length=1000)
+    #: Optional build step run after install (e.g. ``npm run build``).
+    build_command: str = Field(default="", max_length=1000)
+    #: How the target is started/invoked (``node cli.js --request {payload}`` or ``npm start``).
+    start_command: str = Field(default="", max_length=1000)
+    #: "auto" | "cli" (request→output) | "http" (long-running server driven over HTTP).
+    target_type: str = Field(default="auto", max_length=20)
+    #: A pasted ``.env`` blob, parsed server-side into the target's environment variables.
+    env_text: str = Field(default="", max_length=100_000)
+    #: Individually-added target environment variables (merged over ``env_text``).
+    env_vars: dict[str, str] = Field(default_factory=dict)
+    #: Benign workload — example requests KavachX drives the target with. For a CLI these are the
+    #: JSON request objects; for an HTTP server they are ``{"method": "GET", "path": "/x?y=z"}``
+    #: specs. Required to run any non-Python target dynamically; KavachX never fabricates them.
+    benign_requests: list[dict[str, Any]] = Field(default_factory=list, max_length=200)
+
+    @field_validator("target_type")
+    @classmethod
+    def _target_type(cls, v: str) -> str:
+        allowed = {"auto", "cli", "http"}
+        if v and v not in allowed:
+            raise ValueError(f"target_type must be one of {sorted(allowed)}")
+        return v or "auto"
+
     @field_validator("commit_sha")
     @classmethod
     def _hex(cls, v: str) -> str:
