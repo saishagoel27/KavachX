@@ -320,12 +320,39 @@ async def node_ingest(ctx: RunContext, state: KavachState) -> KavachState:
     if provider == RepositoryProvider.GITHUB_PUBLIC.value and fetch_evidence:
         shutil.rmtree(source_path, ignore_errors=True)
 
-    ctx.sandbox = create_sandbox(workspace=pinned.work, execution_profile=ctx.execution_profile)
+    # The sandbox image is the target's toolchain. Pick it now so a Node/Java/Go/Rust target gets an
+    # image that actually has npm/mvn/go/cargo, instead of the Python default that produces
+    # 'npm: not found'. The operator's chosen framework wins (it fixes the toolchain unambiguously);
+    # otherwise a cheap manifest scan detects the language. Either way it happens before any
+    # execution. The descriptor confirmed later only refines the run commands.
+    from app.analysis.framework import detect_run_plan
+    from app.sandbox.images import image_for_framework, image_for_language
+
+    early_run = await _run_row(ctx.run_id)
+    chosen_framework = str(
+        (early_run.get("run", {}).get("run_config") or {}).get("framework") or ""
+    ).strip()
+
+    sandbox_image = image_for_framework(chosen_framework) if chosen_framework else None
+    toolchain_note = f"framework {chosen_framework}" if sandbox_image else ""
+    if not sandbox_image:
+        detected_language = detect_run_plan(pinned.work).language
+        sandbox_image = image_for_language(detected_language)
+        toolchain_note = f"{detected_language or 'unknown'} target"
+
+    ctx.sandbox = create_sandbox(
+        workspace=pinned.work,
+        execution_profile=ctx.execution_profile,
+        image=sandbox_image,
+    )
     await ctx.sandbox.start()
 
     capabilities = ctx.sandbox.capabilities()
+    image_note = (
+        f" · image {sandbox_image} ({toolchain_note})" if capabilities.adapter != "dev" else ""
+    )
     await ctx.emitter.log(
-        f"sandbox adapter '{capabilities.adapter}' — {capabilities.isolation_model}",
+        f"sandbox adapter '{capabilities.adapter}' — {capabilities.isolation_model}{image_note}",
         source="sandbox",
     )
     if not capabilities.suitable_for_untrusted_code:
@@ -514,6 +541,14 @@ async def node_index_repo(ctx: RunContext, state: KavachState) -> KavachState:
     build_cmd = str(cfg.get("build_command") or "").strip()
     start_cmd = str(cfg.get("start_command") or "").strip()
     target_type = str(cfg.get("target_type") or "auto")
+    # A chosen framework fixes whether the target is an HTTP server or a CLI, so honour its kind when
+    # the operator left the target type on auto.
+    if target_type == "auto" and cfg.get("framework"):
+        from app.analysis.frameworks import kind_for_framework
+
+        fw_kind = kind_for_framework(str(cfg.get("framework")))
+        if fw_kind in ("http", "cli"):
+            target_type = fw_kind
     cfg_env = {str(k): str(v) for k, v in (cfg.get("env_vars") or {}).items()}
     benign_requests = [r for r in (cfg.get("benign_requests") or []) if isinstance(r, dict)]
 
@@ -552,6 +587,7 @@ async def node_index_repo(ctx: RunContext, state: KavachState) -> KavachState:
     root_path = ctx.pinned.work / cfg_root if cfg_root != "." else ctx.pinned.work
 
     if is_http and start_cmd:
+        from app.analysis.frameworks import framework_by_id
         from app.analysis.workload import discover_http_routes, synthesize_http_requests
 
         ctx.blackbox = True
@@ -559,6 +595,11 @@ async def node_index_repo(ctx: RunContext, state: KavachState) -> KavachState:
         ctx.blackbox_argv = start_cmd.split()
         ctx.blackbox_cwd = cfg_root
         ctx.blackbox_env = cfg_env
+        # The port the server listens on inside the sandbox — an explicit operator override, else the
+        # chosen framework's default, else 3000. Under gVisor this is the container port published to
+        # loopback; the start command's own --port/bind should match it.
+        fw = framework_by_id(str(cfg.get("framework") or ""))
+        ctx.blackbox_port = int(cfg.get("port") or (fw.port if fw and fw.port else 3000))
         if benign_requests:
             ctx.http_requests = benign_requests
             source = "operator-supplied"
@@ -1050,6 +1091,10 @@ async def _node_validate_blackbox(ctx: RunContext, state: KavachState, phase: st
                 http_requests=ctx.http_requests,
                 cwd=ctx.blackbox_cwd,
                 env=ctx.blackbox_env,
+                # Under gVisor the server runs inside a runsc container; the adapter supplies the
+                # docker argv. The dev adapter has no such method, so it falls back to a host process.
+                service_adapter=ctx.sandbox,
+                container_port=ctx.blackbox_port or None,
             )
         else:
             from app.analysis.blackbox_probe import probe as cli_probe

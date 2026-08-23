@@ -75,6 +75,10 @@ def _build_run_config(payload: RunCreate) -> dict[str, Any]:
         "build_command": payload.build_command.strip(),
         "start_command": payload.start_command.strip(),
         "target_type": payload.target_type or "auto",
+        # The operator's chosen framework fixes the sandbox toolchain (image) and the HTTP listen
+        # port; blank defers to language detection at ingest.
+        "framework": (payload.framework or "").strip(),
+        "port": payload.port or 0,
         "env_vars": env,
         "benign_requests": [r for r in payload.benign_requests if isinstance(r, dict)],
     }

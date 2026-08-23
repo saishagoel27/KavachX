@@ -183,6 +183,20 @@ export interface Repository {
   authority_evidence: Record<string, unknown>;
 }
 
+export interface Framework {
+  id: string;
+  label: string;
+  /** Toolchain language, used by the backend to pick the sandbox image. "" = auto-detect. */
+  language: string;
+  /** "http" (long-running server) | "cli" (request→output) | "" (auto). */
+  kind: string;
+  /** Default listen port for HTTP frameworks (0 for CLI/auto). */
+  port: number;
+  install: string;
+  build: string;
+  start: string;
+}
+
 export interface PublicRepoPreview {
   full_name: string;
   default_branch: string;
@@ -549,6 +563,8 @@ export const endpoints = {
     build_command?: string;
     start_command?: string;
     target_type?: string;
+    framework?: string;
+    port?: number;
     env_text?: string;
     env_vars?: Record<string, string>;
     benign_requests?: Record<string, unknown>[];
@@ -589,6 +605,7 @@ export const endpoints = {
     ),
   verifyAudit: () => api.get<Record<string, any>>("/api/audit/verify"),
 
+  frameworks: () => api.get<{ frameworks: Framework[] }>("/api/system/frameworks"),
   sandboxInfo: () => api.get<Record<string, any>>("/api/system/sandbox"),
   llmInfo: () => api.get<Record<string, any>>("/api/system/llm"),
   limits: () => api.get<Record<string, any>>("/api/system/limits"),

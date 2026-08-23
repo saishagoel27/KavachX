@@ -27,6 +27,19 @@ router = APIRouter(tags=["system"])
 VERSION = "1.0.0"
 
 
+@router.get("/system/frameworks")
+async def list_frameworks() -> dict[str, Any]:
+    """The framework registry backing the run form's dropdown.
+
+    Each entry carries the framework's id, label, toolchain language, observation kind (http/cli),
+    default listen port, and default install/build/start commands. Public reference data — the run
+    form fetches it to populate the dropdown and prefill command suggestions.
+    """
+    from app.analysis.frameworks import public_list
+
+    return {"frameworks": public_list()}
+
+
 @router.get("/audit", response_model=AuditPage)
 async def list_audit(
     request: Request,

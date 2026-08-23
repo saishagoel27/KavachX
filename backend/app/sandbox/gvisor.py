@@ -5,20 +5,30 @@ intercepts syscalls in userspace, so a container escape has to get through the S
 than straight to the host kernel — which is why this, and not plain Docker, is the
 development-to-production step up.
 
-Flags that matter, and why:
+Two postures share this adapter, chosen per execution (see ``ExecRequest.writable`` /
+``allow_network``):
 
-``--network none``            no interface at all, so egress is structurally impossible
-``--read-only``              root filesystem immutable
-``--tmpfs /workspace/.tmp``  the only writable location, size-capped
-``--user 65534:65534``       nobody; never root
+* **Execute phase** — the untrusted target. Maximum confinement:
+  ``--network none``            no interface at all, so egress is structurally impossible
+  ``--read-only``              root filesystem immutable
+  ``--user 65534:65534``       nobody; never root
+  ``--mount …,readonly``       the pinned source tree is mounted read-only
+
+* **Build phase** — the trusted, operator-authored install/build (``npm install``, ``pip install``,
+  ``mvn`` …). It needs the two things the execute phase forbids, and gets only those two:
+  ``--network bridge``         reach the package registry
+  ``--mount`` (read-write) + ``--user <host uid>``  write ``node_modules`` / a venv into the tree
+
+Both postures keep the rest of the confinement set regardless:
+``--tmpfs /workspace/.tmp``  size-capped writable scratch (also holds ``$HOME``, so tool caches land here)
 ``--cap-drop ALL``           no capabilities
 ``--security-opt no-new-privileges``  setuid binaries cannot elevate
 ``--security-opt seccomp=…``  explicit profile on top of gVisor's own filtering
 ``--pids-limit / --memory / --cpus``  resource caps enforced by cgroups
-``--mount …,readonly``       the pinned source tree is mounted read-only
 
-The workspace is mounted read-only and a writable overlay lives on the tmpfs, so the target
-cannot mutate the pinned tree whose hash was computed outside the sandbox.
+In the execute phase the pinned tree is read-only, so the target cannot mutate the tree whose hash
+was computed outside the sandbox. The build phase runs before the hash-bearing observation and
+writes only dependencies operator commands asked for.
 """
 
 from __future__ import annotations
@@ -47,6 +57,20 @@ logger = get_logger(__name__)
 HARNESS_DIR_NAME = "_kavachx"
 CONTAINER_WORKSPACE = "/workspace"
 CONTAINER_TMP = "/workspace/.tmp"
+
+
+def _host_user() -> str:
+    """``uid:gid`` of the host process, for the writable build phase.
+
+    The workspace bind-mount is owned by the host user, so a container writing ``node_modules`` into
+    it must run as that uid — 'nobody' (65534) would be denied. gVisor is Linux-only, so ``getuid``
+    exists; the fallback keeps a non-Linux import from raising.
+    """
+    getuid = getattr(os, "getuid", None)
+    getgid = getattr(os, "getgid", None)
+    if getuid is not None and getgid is not None:
+        return f"{getuid()}:{getgid()}"
+    return "0:0"
 
 
 class GvisorSandboxAdapter(SandboxAdapter):
@@ -91,6 +115,11 @@ class GvisorSandboxAdapter(SandboxAdapter):
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.harness_dir.mkdir(parents=True, exist_ok=True)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        # The tmpfs mounts at CONTAINER_TMP (/workspace/.tmp). Because the workspace is bind-mounted
+        # read-only in the execute phase, that mountpoint cannot be created inside the container —
+        # runsc fails container creation with exit 125. Create it on the host first, like the
+        # harness output dir, so the mountpoint always exists under the read-only bind.
+        (self.workspace / ".tmp").mkdir(parents=True, exist_ok=True)
         for item in (Path(__file__).parent / "harness").glob("*.py"):
             shutil.copy2(item, self.harness_dir / item.name)
 
@@ -121,16 +150,38 @@ class GvisorSandboxAdapter(SandboxAdapter):
         # PATH inside the image, not the host's.
         env["PATH"] = "/usr/local/bin:/usr/bin:/bin"
 
+        # Two postures share this adapter. The trusted *build* phase (operator-authored install /
+        # build) needs the registry and a writable tree; the untrusted *execute* phase gets neither.
+        if request.writable:
+            # Build phase: network egress for the package registry, workspace bound read-write, and
+            # run as the host uid so writes to the bind mount are permitted (the mount is owned by
+            # the host user, not by 'nobody'). The rootfs stays writable because some installers
+            # touch it; every other confinement — non-root of the host user, dropped capabilities,
+            # no-new-privileges, resource caps, runsc — is unchanged.
+            network_args = ["--network", "bridge"]
+            user_args = ["--user", _host_user()]
+            read_only_root: list[str] = []
+            source_mount = (
+                f"type=bind,source={self.workspace.resolve()},target={CONTAINER_WORKSPACE}"
+            )
+        else:
+            # Execute phase: no interface at all (egress structurally impossible), read-only rootfs,
+            # read-only pinned tree, and the 'nobody' user.
+            network_args = ["--network", "none"]
+            user_args = ["--user", "65534:65534"]
+            read_only_root = ["--read-only"]
+            source_mount = (
+                f"type=bind,source={self.workspace.resolve()},target={CONTAINER_WORKSPACE},readonly"
+            )
+
         argv = [
             self._docker,
             "run",
             "--rm",
             f"--runtime={self.runtime}",
-            "--network",
-            "none",
-            "--read-only",
-            "--user",
-            "65534:65534",
+            *network_args,
+            *read_only_root,
+            *user_args,
             "--cap-drop",
             "ALL",
             "--security-opt",
@@ -147,11 +198,11 @@ class GvisorSandboxAdapter(SandboxAdapter):
         if self.seccomp_profile and self.seccomp_profile.is_file():
             argv += ["--security-opt", f"seccomp={self.seccomp_profile}"]
 
-        # The pinned tree is read-only; only the harness output directory is writable, and it
-        # lives on the tmpfs via a bind of its own.
+        # The output directory is always writable via its own bind; the pinned tree is read-only in
+        # the execute phase and read-write in the build phase (see source_mount above).
         argv += [
             "--mount",
-            f"type=bind,source={self.workspace.resolve()},target={CONTAINER_WORKSPACE},readonly",
+            source_mount,
             "--mount",
             f"type=bind,source={self.output_dir.resolve()},"
             f"target={CONTAINER_WORKSPACE}/{HARNESS_DIR_NAME}/out",
@@ -180,10 +231,11 @@ class GvisorSandboxAdapter(SandboxAdapter):
             timed_out=completed.timed_out,
             peak_ram_mb=0,
             cpu_seconds=0.0,
-            # No interface exists in the container, so egress is zero by construction.
+            # In the execute phase no interface exists, so egress is zero by construction. The build
+            # phase (writable, networked) is a trusted provisioning step, not a proof-bearing run.
             egress_bytes=0,
             network_attempts=int(guard.get("network_attempts", 0)),
-            network_enforced=True,
+            network_enforced=not request.allow_network,
             signals=extract_signals(completed.stdout, completed.stderr),
             artifacts=self._collect(request.collect_artifacts),
             label=request.label,
@@ -191,6 +243,83 @@ class GvisorSandboxAdapter(SandboxAdapter):
         if completed.timed_out:
             result.signals.append("timeout")
         return self._record(result)
+
+    # ------------------------------------------------------------------
+    @property
+    def docker_path(self) -> str | None:
+        """The resolved ``docker`` binary, available after :meth:`start`. Used by the HTTP service
+        runner to drive ``docker logs`` / ``docker rm`` on the detached server container."""
+        return self._docker
+
+    def service_container_argv(
+        self,
+        *,
+        name: str,
+        host_port: int,
+        container_port: int,
+        cwd: str,
+        env: dict[str, str],
+        start_command: str,
+    ) -> list[str]:
+        """``docker run`` argv for a **long-running HTTP service** under gVisor.
+
+        Unlike :meth:`execute` (a one-shot, no-network, read-only container), a web service must stay
+        up while the prober drives it and must be reachable. So this is detached (``-d``), on
+        ``--network bridge`` with the app's port published to loopback only, with the workspace bound
+        **read-write** — a service writes logs/uploads that are themselves observable effects — and
+        run as the host uid so those writes land on the bind mount. Every other confinement (dropped
+        capabilities, no-new-privileges, resource caps, seccomp, runsc) is unchanged. Torn down with
+        ``docker rm -f <name>``.
+        """
+        assert self._docker
+        env_map = build_sandbox_env(
+            {
+                "PORT": str(container_port),
+                "HOST": "0.0.0.0",
+                "HOME": CONTAINER_TMP,
+                "TMPDIR": CONTAINER_TMP,
+                **(env or {}),
+            }
+        )
+        env_map["PATH"] = "/usr/local/bin:/usr/bin:/bin"
+
+        argv = [
+            self._docker,
+            "run",
+            "--rm",
+            "-d",
+            "--name",
+            name,
+            f"--runtime={self.runtime}",
+            "--network",
+            "bridge",
+            "-p",
+            f"127.0.0.1:{host_port}:{container_port}",
+            "--user",
+            _host_user(),
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            f"--pids-limit={self.limits.pid_limit}",
+            f"--memory={self.limits.memory_mb}m",
+            f"--memory-swap={self.limits.memory_mb}m",
+            f"--cpus={self.limits.cpu_limit}",
+            "--tmpfs",
+            f"{CONTAINER_TMP}:rw,noexec,nosuid,size={self.limits.disk_mb}m",
+            "--workdir",
+            f"{CONTAINER_WORKSPACE}/{cwd}".rstrip("/."),
+        ]
+        if self.seccomp_profile and self.seccomp_profile.is_file():
+            argv += ["--security-opt", f"seccomp={self.seccomp_profile}"]
+        argv += [
+            "--mount",
+            f"type=bind,source={self.workspace.resolve()},target={CONTAINER_WORKSPACE}",
+        ]
+        for key, value in env_map.items():
+            argv += ["--env", f"{key}={value}"]
+        argv += [self.image, "sh", "-c", start_command]
+        return argv
 
     def _collect(self, paths: list[str]) -> dict[str, str]:
         out: dict[str, str] = {}

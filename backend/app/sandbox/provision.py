@@ -97,9 +97,16 @@ async def provision(
                 env=dict(env or {}),
                 timeout_seconds=timeout_seconds,
                 label=f"provision:{label}",
+                # Provisioning is the trusted build phase: it needs the package registry and a
+                # writable tree. Under gVisor this selects the networked, read-write posture; host
+                # adapters ignore both flags (already writable and networked).
+                writable=True,
+                allow_network=True,
             )
         )
-        tail = (result.stdout[-800:] + ("\n" + result.stderr[-800:] if result.stderr else "")).strip()
+        tail = (
+            result.stdout[-800:] + ("\n" + result.stderr[-800:] if result.stderr else "")
+        ).strip()
         step = ProvisionStep(
             label=label,
             command=command,

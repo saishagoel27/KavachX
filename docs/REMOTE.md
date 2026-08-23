@@ -60,7 +60,13 @@ bash setup-gvisor-local.sh --run
 <details><summary>Or do it manually</summary>
 
 ```bash
-docker build -t kavachx/sandbox:dev ./sandbox
+# One sandbox image per language toolchain; the image is chosen per run from the detected language
+# (backend/app/sandbox/images.py). Identical isolation on all of them.
+docker build -t kavachx/sandbox:dev      ./sandbox                              # python + clang (default)
+docker build -f sandbox/Dockerfile.node -t kavachx/sandbox-node:dev ./sandbox   # node / js / ts / solidity
+docker build -f sandbox/Dockerfile.java -t kavachx/sandbox-java:dev ./sandbox   # java / kotlin
+docker build -f sandbox/Dockerfile.go   -t kavachx/sandbox-go:dev   ./sandbox   # go
+docker build -f sandbox/Dockerfile.rust -t kavachx/sandbox-rust:dev ./sandbox   # rust
 docker compose up -d postgres
 cd backend
 uv run alembic upgrade head

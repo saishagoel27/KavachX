@@ -1,0 +1,43 @@
+# KavachX sandbox image — Node / JavaScript / TypeScript targets.
+#
+# Selected automatically when the detected project language is node/javascript/typescript
+# (app/sandbox/images.py). Same isolation as every other sandbox image — the adapter supplies
+# --runtime=runsc, --cap-drop ALL, resource caps, and (in the untrusted execute phase) --network
+# none plus a read-only mount. This image only changes the *toolchain*: node + npm are present so
+# `npm install` / `npm run build` can run in the writable, networked build phase, and the built app
+# can be executed in the locked-down execute phase.
+#
+# Build:
+#   docker build -f sandbox/Dockerfile.node -t kavachx/sandbox-node:dev sandbox
+
+FROM node:20-slim
+
+# node-gyp — native addons of otherwise-JS packages — needs python3 + a C/C++ toolchain. Without it
+# many ordinary `npm install`s fail. clang is not required here; the base toolchain is enough.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      python3 \
+      make \
+      g++ \
+ && rm -rf /var/lib/apt/lists/* \
+ # Remove the network tools the base image ships. The execute phase gives the container no
+ # interface at all, so these are unreachable there; deleting them removes the question.
+ && rm -f /usr/bin/curl /usr/bin/wget /usr/bin/nc /usr/bin/telnet 2>/dev/null || true
+
+# Deterministic, quiet installs. HOME is redirected to the writable tmpfs by the adapter, so npm's
+# cache lands there rather than on the read-only rootfs.
+ENV npm_config_fund=false \
+    npm_config_audit=false \
+    npm_config_update_notifier=false \
+    CI=true
+
+# The workspace is bind-mounted by the adapter (read-write in the build phase, read-only in execute).
+WORKDIR /workspace
+
+# nobody. The adapter passes --user as well: 'nobody' in the execute phase, the host uid in the
+# writable build phase (so writes to the bind-mounted workspace are permitted).
+USER 65534:65534
+
+# No ENTRYPOINT: every execution is an explicit argument vector from the adapter, never a shell
+# string, so nothing here can interpret a metacharacter.
+CMD ["node", "-e", "console.log('kavachx node sandbox; the adapter supplies the command')"]

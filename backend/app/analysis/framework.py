@@ -296,6 +296,38 @@ def _classify_dir(base: Path) -> RunPlan:
         r.run_command = ["go", "run", "."]
         r.test_command = ["go", "test", "./..."]
 
+    # -- Java / Kotlin (Maven or Gradle) --------------------------------------
+    elif (
+        (base / "pom.xml").is_file()
+        or (base / "build.gradle").is_file()
+        or (base / "build.gradle.kts").is_file()
+    ):
+        is_gradle = (base / "build.gradle").is_file() or (base / "build.gradle.kts").is_file()
+        r.language = (
+            "kotlin"
+            if (base / "build.gradle.kts").is_file() or next(base.rglob("*.kt"), None) is not None
+            else "java"
+        )
+        blob = ""
+        for manifest in ("pom.xml", "build.gradle", "build.gradle.kts"):
+            if (base / manifest).is_file():
+                blob += _read(base / manifest).lower()
+        if "spring" in blob:
+            r.frameworks.append("spring")
+            r.kind = "web_service"
+        else:
+            r.kind = "cli"
+        if is_gradle:
+            gradle = "./gradlew" if (base / "gradlew").is_file() else "gradle"
+            r.install_command = [gradle, "build", "-x", "test"]
+            r.test_command = [gradle, "test"]
+        else:
+            mvn = "./mvnw" if (base / "mvnw").is_file() else "mvn"
+            r.install_command = [mvn, "-q", "-DskipTests", "package"]
+            r.test_command = [mvn, "test"]
+        r.build_command = list(r.install_command)
+        r.run_command = ["java", "-jar", "target/*.jar"]
+
     return r
 
 

@@ -183,13 +183,26 @@ $DOCKER run --rm --runtime=runsc hello-world >/dev/null \
   || die "gVisor smoke test failed. Try platform=ptrace: sudo runsc install -- --platform=ptrace"
 log "gVisor is working."
 
-# --- 5. hardened sandbox image ----------------------------------------------
-if [[ "$REBUILD" != "1" ]] && $DOCKER image inspect kavachx/sandbox:dev >/dev/null 2>&1; then
-  log "Sandbox image kavachx/sandbox:dev already exists — skipping build (use --rebuild to force)."
-else
-  log "Building kavachx/sandbox:dev…"
-  $DOCKER build -t kavachx/sandbox:dev ./sandbox
-fi
+# --- 5. hardened sandbox images (one toolchain per language) ----------------
+# Every image shares identical isolation (the adapter supplies runsc, cap-drop, resource caps, and
+# --network none + read-only mount in the untrusted execute phase). Only the *toolchain* differs.
+# The image is chosen per run from the detected project language — see backend/app/sandbox/images.py.
+# The node/java/go base images are large; the first build pulls them once, then they are cached.
+build_sandbox_image() {  # <tag> [extra docker build args…]
+  local tag="$1"; shift
+  if [[ "$REBUILD" != "1" ]] && $DOCKER image inspect "$tag" >/dev/null 2>&1; then
+    log "Sandbox image $tag already exists — skipping build (use --rebuild to force)."
+  else
+    log "Building $tag…"
+    $DOCKER build "$@" -t "$tag" ./sandbox
+  fi
+}
+
+build_sandbox_image kavachx/sandbox:dev                                    # python + clang (default)
+build_sandbox_image kavachx/sandbox-node:dev -f sandbox/Dockerfile.node    # node / js / ts / solidity
+build_sandbox_image kavachx/sandbox-java:dev -f sandbox/Dockerfile.java    # java / kotlin
+build_sandbox_image kavachx/sandbox-go:dev   -f sandbox/Dockerfile.go      # go
+build_sandbox_image kavachx/sandbox-rust:dev -f sandbox/Dockerfile.rust    # rust
 
 # --- 6. uv (Python toolchain) ------------------------------------------------
 if ! command -v uv >/dev/null 2>&1; then

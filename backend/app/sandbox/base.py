@@ -96,6 +96,15 @@ class ExecRequest:
     #: Workspace-relative paths to read back after the run.
     collect_artifacts: list[str] = field(default_factory=list)
     label: str = ""
+    #: Build phase (trusted, operator-authored install/build). Binds the workspace **read-write**
+    #: instead of read-only, so ``npm install`` / ``pip install`` can write ``node_modules`` / a
+    #: venv into the tree. The untrusted execute phase leaves this False.
+    writable: bool = False
+    #: Build phase. Gives the container network egress, because a package registry is unreachable
+    #: otherwise. The untrusted execute phase leaves this False, so egress there is structurally
+    #: zero (no interface exists). Host adapters ignore both flags — the host is already writable
+    #: and networked.
+    allow_network: bool = False
     #: Maximum captured stdout/stderr, to bound memory on a chatty target.
     max_output_bytes: int = 1_000_000
 

@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import { PublicRepoAttach } from "@/components/public-repo";
-import { ApiError, endpoints, type Project, type Repository } from "@/lib/api";
+import { ApiError, endpoints, type Framework, type Project, type Repository } from "@/lib/api";
 import { Chip, ErrorNote, LoadingPanel, Panel, Spinner, WarningNote } from "@/components/ui";
 
 /**
@@ -55,6 +55,58 @@ const EXECUTION_PROFILES = [
   },
 ];
 
+/**
+ * Framework signatures for client-side inference — mirrors `infer_framework` in the backend
+ * (app/analysis/frameworks.py), ordered most-specific first so "next" wins over the generic "npm".
+ * The API's framework list carries labels/commands/ports but not these substrings, so they live here.
+ */
+const FRAMEWORK_SIGNATURES: [string, string[]][] = [
+  ["next", ["next"]],
+  ["nestjs", ["nest"]],
+  ["remix", ["remix"]],
+  ["fastify", ["fastify"]],
+  ["koa", ["koa"]],
+  ["express", ["express"]],
+  ["hardhat", ["hardhat"]],
+  ["fastapi", ["uvicorn", "fastapi", "hypercorn"]],
+  ["django", ["manage.py", "django"]],
+  ["flask", ["flask", "gunicorn"]],
+  ["spring", ["spring", "mvnw", "gradlew", "mvn", "gradle"]],
+  ["go-http", ["go run", "go build", "go "]],
+  ["rust-http", ["actix", "axum", "rocket", "warp", "cargo run", "cargo"]],
+  ["python-http", ["starlette", "aiohttp", "tornado", "sanic"]],
+  ["node-http", ["npm", "node", "pnpm", "yarn"]],
+  ["python-cli", ["python", "pip", "uv", "poetry"]],
+];
+
+function inferFrameworkId(install: string, build: string, start: string): string {
+  const blob = `${install} ${build} ${start}`.toLowerCase();
+  if (!blob.trim()) return "auto";
+  for (const [id, sigs] of FRAMEWORK_SIGNATURES) {
+    if (sigs.some((s) => blob.includes(s))) return id;
+  }
+  return "auto";
+}
+
+/**
+ * Minimal fallback so the dropdown and prefills still work if `/api/system/frameworks` is briefly
+ * unreachable. The full list normally comes from the backend registry.
+ */
+const FALLBACK_FRAMEWORKS: Framework[] = [
+  { id: "next", label: "Next.js", language: "node", kind: "http", port: 3000, install: "npm install", build: "npm run build", start: "npm run start" },
+  { id: "express", label: "Express", language: "node", kind: "http", port: 3000, install: "npm install", build: "", start: "npm start" },
+  { id: "node-cli", label: "Node (CLI)", language: "node", kind: "cli", port: 0, install: "npm install", build: "", start: "node ." },
+  { id: "fastapi", label: "FastAPI", language: "python", kind: "http", port: 8000, install: "pip install -r requirements.txt", build: "", start: "uvicorn app.main:app --host 0.0.0.0 --port 8000" },
+  { id: "flask", label: "Flask", language: "python", kind: "http", port: 5000, install: "pip install -r requirements.txt", build: "", start: "flask run --host 0.0.0.0" },
+  { id: "django", label: "Django", language: "python", kind: "http", port: 8000, install: "pip install -r requirements.txt", build: "", start: "python manage.py runserver 0.0.0.0:8000" },
+  { id: "python-cli", label: "Python (CLI)", language: "python", kind: "cli", port: 0, install: "pip install -r requirements.txt", build: "", start: "python main.py" },
+  { id: "spring", label: "Spring Boot", language: "java", kind: "http", port: 8080, install: "./mvnw -q -DskipTests package", build: "", start: "java -jar target/*.jar" },
+  { id: "go-http", label: "Go (HTTP)", language: "go", kind: "http", port: 8080, install: "go mod download", build: "go build -o app .", start: "./app" },
+  { id: "rust-http", label: "Rust (Actix/Axum/Rocket)", language: "rust", kind: "http", port: 8080, install: "cargo build --release", build: "", start: "./target/release/app" },
+  { id: "hardhat", label: "Hardhat (Solidity)", language: "node", kind: "cli", port: 0, install: "npm install", build: "npx hardhat compile", start: "npx hardhat test" },
+  { id: "auto", label: "Auto-detect / Other", language: "", kind: "", port: 0, install: "", build: "", start: "" },
+];
+
 // Quick client-side count of KEY=VALUE lines in a pasted .env (the server does the real parse).
 function countEnvLines(text: string): number {
   return text
@@ -101,6 +153,9 @@ export default function NewRunPage() {
   const [buildCommand, setBuildCommand] = useState("");
   const [startCommand, setStartCommand] = useState("");
   const [targetType, setTargetType] = useState("auto");
+  const [framework, setFramework] = useState("auto");
+  const [frameworkTouched, setFrameworkTouched] = useState(false);
+  const [frameworks, setFrameworks] = useState<Framework[]>(FALLBACK_FRAMEWORKS);
   const [envText, setEnvText] = useState("");
   const [envRows, setEnvRows] = useState<{ key: string; value: string }[]>([]);
   const [benignText, setBenignText] = useState("");
@@ -125,7 +180,32 @@ export default function NewRunPage() {
         setRepositories([]);
       }
     })();
+    // The framework list backs the dropdown; keep the fallback if it can't be fetched.
+    void endpoints
+      .frameworks()
+      .then((r) => {
+        if (r.frameworks?.length) setFrameworks(r.frameworks);
+      })
+      .catch(() => {});
   }, []);
+
+  // Auto-infer the framework from the commands the operator types — until they pick one by hand.
+  useEffect(() => {
+    if (frameworkTouched) return;
+    setFramework(inferFrameworkId(installCommand, buildCommand, startCommand));
+  }, [installCommand, buildCommand, startCommand, frameworkTouched]);
+
+  // Manual override: remember the choice, prefill any *empty* command fields, and sync target type.
+  const onSelectFramework = (id: string) => {
+    setFramework(id);
+    setFrameworkTouched(true);
+    const fw = frameworks.find((f) => f.id === id);
+    if (!fw) return;
+    if (!installCommand.trim() && fw.install) setInstallCommand(fw.install);
+    if (!buildCommand.trim() && fw.build) setBuildCommand(fw.build);
+    if (!startCommand.trim() && fw.start) setStartCommand(fw.start);
+    if (fw.kind === "http" || fw.kind === "cli") setTargetType(fw.kind);
+  };
 
   const onPublicAttached = (repository: Repository) => {
     setRepositories((current) => [repository, ...(current ?? [])]);
@@ -161,6 +241,7 @@ export default function NewRunPage() {
         build_command: buildCommand.trim(),
         start_command: startCommand.trim(),
         target_type: targetType,
+        framework: framework === "auto" ? "" : framework,
         env_text: envText,
         env_vars,
         benign_requests: parseBenignRequests(benignText),
@@ -312,6 +393,38 @@ export default function NewRunPage() {
             subtitle="How to install, run and reach the target — like Vercel/Render. Blank = auto-detect."
           >
             <div className="space-y-4">
+              <div>
+                <div className="flex items-center justify-between">
+                  <label className="label" htmlFor="framework">
+                    Framework
+                  </label>
+                  {framework !== "auto" && (
+                    <span className="font-mono text-[10px] text-foreground-faint">
+                      {frameworkTouched ? "selected" : "auto-detected from commands"}
+                    </span>
+                  )}
+                </div>
+                <select
+                  id="framework"
+                  value={framework}
+                  onChange={(e) => onSelectFramework(e.target.value)}
+                  className="field"
+                >
+                  {frameworks.map((fw) => (
+                    <option key={fw.id} value={fw.id}>
+                      {fw.label}
+                      {fw.language ? ` · ${fw.language}` : ""}
+                      {fw.kind ? ` · ${fw.kind}` : ""}
+                    </option>
+                  ))}
+                </select>
+                <p className="mt-1 text-[11px] leading-4 text-foreground-faint">
+                  Sets the sandbox toolchain (Node / Python / Java / Go / Rust) and whether the target
+                  is driven over HTTP or as a CLI. Auto-set from your commands — override it if wrong.
+                  Picking one prefills any empty command fields below.
+                </p>
+              </div>
+
               <div className="grid gap-4 sm:grid-cols-2">
                 <div>
                   <label className="label" htmlFor="root_directory">

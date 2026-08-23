@@ -38,7 +38,14 @@ def create_sandbox(
     workspace: Path,
     execution_profile: str | None = None,
     limits: SandboxLimits | None = None,
+    image: str | None = None,
 ) -> SandboxAdapter:
+    """Build the sandbox for a run.
+
+    ``image`` selects the toolchain the target is built and executed against — chosen from the
+    detected language (see app/sandbox/images.py), not hardcoded. It matters only for the container
+    adapters; the host ``dev`` adapter uses the host's own toolchains and ignores it.
+    """
     adapter_name = _PROFILE_TO_ADAPTER.get(execution_profile or "", "") or settings.sandbox_adapter
     limits = limits or default_limits()
 
@@ -53,7 +60,7 @@ def create_sandbox(
 
     if adapter_name == "gvisor":
         return GvisorSandboxAdapter(
-            workspace=workspace, limits=limits, image=settings.sandbox_image
+            workspace=workspace, limits=limits, image=image or settings.sandbox_image
         )
 
     if adapter_name == "firecracker":

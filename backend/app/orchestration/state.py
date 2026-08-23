@@ -161,6 +161,9 @@ class RunContext:
     blackbox_env: dict[str, str] = field(default_factory=dict)
     #: HTTP request specs ({method, path}) for the http black-box benign workload.
     http_requests: list[dict[str, Any]] = field(default_factory=list)
+    #: The port an http target listens on inside the sandbox (framework default or operator override).
+    #: Used to publish the container port when the server runs under gVisor.
+    blackbox_port: int = 0
     #: Aggregate metrics mirrored onto the Run row and the metric event stream.
     metrics: dict[str, Any] = field(
         default_factory=lambda: {

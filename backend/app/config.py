@@ -93,7 +93,16 @@ class Settings(BaseSettings):
 
     # --- sandbox -----------------------------------------------------------
     sandbox_adapter: Literal["dev", "gvisor", "firecracker"] = "dev"
+    #: Default / fallback image (Python + clang toolchain). Used for python, c, and any language
+    #: without a dedicated image below.
     sandbox_image: str = "kavachx/sandbox:dev"
+    #: Per-language images, selected from the detected project language. A Python-only image cannot
+    #: build or run a Node/Java/Go target, so the toolchain image is chosen — not hardcoded. See
+    #: app/sandbox/images.py for the mapping.
+    sandbox_image_node: str = "kavachx/sandbox-node:dev"
+    sandbox_image_java: str = "kavachx/sandbox-java:dev"
+    sandbox_image_go: str = "kavachx/sandbox-go:dev"
+    sandbox_image_rust: str = "kavachx/sandbox-rust:dev"
     sandbox_cpu_limit: float = 2.0
     sandbox_memory_mb: int = 2048
     sandbox_pid_limit: int = 256

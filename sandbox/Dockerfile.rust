@@ -1,0 +1,26 @@
+# KavachX sandbox image — Rust targets.
+#
+# Selected automatically when the detected project language is rust (app/sandbox/images.py). Same
+# isolation as every other sandbox image; only the toolchain differs. The Rust toolchain is present
+# so `cargo build` / `cargo run` work in the writable, networked build phase, and the built binary
+# can be executed in the locked-down execute phase.
+#
+# Build:
+#   docker build -f sandbox/Dockerfile.rust -t kavachx/sandbox-rust:dev sandbox
+
+FROM rust:1-slim-bookworm
+
+# The execute phase gives the container no interface; drop the network tools the base image ships.
+RUN rm -f /usr/bin/curl /usr/bin/wget /usr/bin/nc /usr/bin/telnet 2>/dev/null || true
+
+# Cargo's registry cache and build output live under HOME, which the adapter redirects to the
+# writable tmpfs, so nothing needs the read-only rootfs.
+ENV CARGO_HOME=/workspace/.tmp/.cargo \
+    CARGO_TARGET_DIR=/workspace/target
+
+WORKDIR /workspace
+
+# nobody in the execute phase; the adapter overrides to the host uid for the writable build phase.
+USER 65534:65534
+
+CMD ["rustc", "--version"]

@@ -250,6 +250,11 @@ class RunCreate(BaseModel):
     start_command: str = Field(default="", max_length=1000)
     #: "auto" | "cli" (request→output) | "http" (long-running server driven over HTTP).
     target_type: str = Field(default="auto", max_length=20)
+    #: Chosen framework id (see app/analysis/frameworks.py) — fixes the sandbox toolchain image and,
+    #: for HTTP targets, the listen port. Blank defers to language detection at ingest.
+    framework: str = Field(default="", max_length=40)
+    #: Explicit HTTP listen port override; 0 = use the framework default (or 3000).
+    port: int = Field(default=0, ge=0, le=65535)
     #: A pasted ``.env`` blob, parsed server-side into the target's environment variables.
     env_text: str = Field(default="", max_length=100_000)
     #: Individually-added target environment variables (merged over ``env_text``).
