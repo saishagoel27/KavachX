@@ -19,7 +19,6 @@ RUN apt-get update \
       python3 \
       make \
       g++ \
-      time \
  && rm -rf /var/lib/apt/lists/* \
  # Remove the network tools the base image ships. The execute phase gives the container no
  # interface at all, so these are unreachable there; deleting them removes the question.

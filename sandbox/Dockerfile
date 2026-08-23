@@ -23,7 +23,6 @@ RUN apt-get update \
       libclang-rt-dev \
       make \
       binutils \
-      time \
  && rm -rf /var/lib/apt/lists/* \
  # Remove the network tools the base image ships with. The adapter gives the container no
  # interface at all, so these are unreachable anyway — deleting them removes the question.

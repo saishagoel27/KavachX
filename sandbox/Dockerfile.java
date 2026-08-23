@@ -15,7 +15,6 @@ FROM eclipse-temurin:21-jdk
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       maven \
-      time \
  && rm -rf /var/lib/apt/lists/* \
  # The execute phase gives the container no interface; drop the network tools the base image ships.
  && rm -f /usr/bin/curl /usr/bin/wget /usr/bin/nc /usr/bin/telnet 2>/dev/null || true
