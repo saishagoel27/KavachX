@@ -112,6 +112,20 @@ class GvisorSandboxAdapter(SandboxAdapter):
                 "SANDBOX_ADAPTER=dev for local development."
             )
 
+        # Fail fast if the target's toolchain image is not built: otherwise every `docker run` below
+        # returns a bare exit 125 ("no such image"), the run limps to zero findings, and the result
+        # looks like "nothing wrong" when in truth nothing ran. Name the image and how to build it.
+        image_probe = await _run([self._docker, "image", "inspect", self.image])
+        if image_probe.returncode != 0:
+            raise SandboxUnavailable(
+                f"The sandbox image {self.image!r} is not built on this host, so the target's "
+                "toolchain is unavailable. Build the per-language sandbox images — run "
+                "`bash setup-gvisor-local.sh` (it builds all of them), or build this one directly, "
+                "e.g. `docker build -f sandbox/Dockerfile.node -t kavachx/sandbox-node:dev "
+                "./sandbox` (…-java / …-go / …-rust for the others).",
+                code="SANDBOX_IMAGE_MISSING",
+            )
+
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.harness_dir.mkdir(parents=True, exist_ok=True)
         self.output_dir.mkdir(parents=True, exist_ok=True)
