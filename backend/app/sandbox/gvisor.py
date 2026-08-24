@@ -61,6 +61,10 @@ HARNESS_DIR_NAME = "_kavachx"
 CONTAINER_WORKSPACE = "/workspace"
 CONTAINER_TMP = "/workspace/.tmp"
 
+#: image → does it ship /usr/bin/time. Probed once per image per process, then reused, so the
+#: detection never re-runs a container on a busy host.
+_TIME_PROBE_CACHE: dict[str, bool] = {}
+
 
 def _host_user() -> str:
     """``uid:gid`` of the host process, for the writable build phase.
@@ -134,17 +138,22 @@ class GvisorSandboxAdapter(SandboxAdapter):
             )
 
         # Detect GNU time in the image so each exec can be measured for real peak RSS and CPU
-        # (getrusage, which gVisor implements). Fully optional and defensive: any failure here leaves
-        # measurement off, so an image built before `time` was added simply reports zero — it never
-        # breaks the run. Never lets an exception escape start().
-        try:
-            time_probe = await _run(
-                [self._docker, "run", "--rm", self.image, "/usr/bin/time", "--version"],
-                timeout=30,
-            )
-            self._have_time = time_probe.returncode == 0
-        except Exception:
-            self._have_time = False
+        # (getrusage, which gVisor implements). Cached per image so this runs one throwaway container
+        # for the whole process lifetime, not one per run — no repeated load on a busy host. Fully
+        # optional and defensive: any failure leaves measurement off (metrics report zero), never an
+        # error, and no exception escapes start().
+        if self.image in _TIME_PROBE_CACHE:
+            self._have_time = _TIME_PROBE_CACHE[self.image]
+        else:
+            try:
+                time_probe = await _run(
+                    [self._docker, "run", "--rm", self.image, "/usr/bin/time", "--version"],
+                    timeout=30,
+                )
+                self._have_time = time_probe.returncode == 0
+            except Exception:
+                self._have_time = False
+            _TIME_PROBE_CACHE[self.image] = self._have_time
 
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.harness_dir.mkdir(parents=True, exist_ok=True)
@@ -558,4 +567,6 @@ def _egress_sampler(docker: str, name: str, holder: dict[str, int], stop: thread
                     holder["tx"] = tx
         except Exception:
             pass
-        stop.wait(1.5)
+        # A relaxed interval: NetIO is cumulative, so a coarse poll still captures near-final egress
+        # while barely touching the docker daemon during a long, resource-heavy build.
+        stop.wait(5.0)

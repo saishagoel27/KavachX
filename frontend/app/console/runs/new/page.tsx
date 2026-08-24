@@ -5,7 +5,14 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import { PublicRepoAttach } from "@/components/public-repo";
-import { ApiError, endpoints, type Framework, type Project, type Repository } from "@/lib/api";
+import {
+  ApiError,
+  endpoints,
+  type Framework,
+  type Project,
+  type Repository,
+  type SystemLimits,
+} from "@/lib/api";
 import { Chip, ErrorNote, LoadingPanel, Panel, Spinner, WarningNote } from "@/components/ui";
 
 /**
@@ -141,8 +148,9 @@ export default function NewRunPage() {
   const [analysisProfile, setAnalysisProfile] = useState("standard");
   const [executionProfile, setExecutionProfile] = useState("dev_local");
   const [maxRuntime, setMaxRuntime] = useState(1800);
-  const [memoryMb, setMemoryMb] = useState(2048);
-  const [tokenBudget, setTokenBudget] = useState(400000);
+  // Backend-enforced ceilings. Sandbox memory/CPU and the token budget are set on the backend and
+  // apply to every run — the form shows them read-only so a user can't request more than allowed.
+  const [limits, setLimits] = useState<SystemLimits | null>(null);
   const [confirmed, setConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
@@ -185,6 +193,15 @@ export default function NewRunPage() {
       .frameworks()
       .then((r) => {
         if (r.frameworks?.length) setFrameworks(r.frameworks);
+      })
+      .catch(() => {});
+    // Backend ceilings — used to cap max-runtime and to show the real sandbox memory / token budget.
+    void endpoints
+      .limits()
+      .then((l) => {
+        setLimits(l);
+        // Default the runtime to the backend ceiling and never exceed it.
+        setMaxRuntime((current) => Math.min(current, l.run_max_runtime_seconds));
       })
       .catch(() => {});
   }, []);
@@ -690,45 +707,52 @@ export default function NewRunPage() {
                   id="runtime"
                   type="number"
                   min={60}
-                  max={14400}
+                  max={limits?.run_max_runtime_seconds ?? 14400}
                   value={maxRuntime}
-                  onChange={(e) => setMaxRuntime(Number(e.target.value))}
+                  onChange={(e) => {
+                    const cap = limits?.run_max_runtime_seconds ?? 14400;
+                    setMaxRuntime(Math.min(Math.max(60, Number(e.target.value) || 60), cap));
+                  }}
                   className="field font-mono"
                 />
+                {limits && (
+                  <p className="mt-1 text-[10px] text-foreground-faint">
+                    max {limits.run_max_runtime_seconds}s (backend ceiling)
+                  </p>
+                )}
               </div>
               <div>
-                <label className="label" htmlFor="memory">
-                  Sandbox memory (MB)
+                <label className="label">
+                  Sandbox memory (MB){" "}
+                  <span className="text-foreground-faint">· set on backend</span>
                 </label>
-                <input
-                  id="memory"
-                  type="number"
-                  min={256}
-                  max={16384}
-                  value={memoryMb}
-                  onChange={(e) => setMemoryMb(Number(e.target.value))}
-                  className="field font-mono"
-                />
+                <div className="field font-mono flex items-center text-foreground-muted">
+                  {limits ? limits.sandbox.memory_mb : "—"}
+                </div>
+                {limits && (
+                  <p className="mt-1 text-[10px] text-foreground-faint">
+                    {limits.sandbox.cpu_limit} CPU · applies to every run
+                  </p>
+                )}
               </div>
               <div>
-                <label className="label" htmlFor="tokens">
-                  Token budget
+                <label className="label">
+                  Token budget <span className="text-foreground-faint">· set on backend</span>
                 </label>
-                <input
-                  id="tokens"
-                  type="number"
-                  min={10000}
-                  step={10000}
-                  value={tokenBudget}
-                  onChange={(e) => setTokenBudget(Number(e.target.value))}
-                  className="field font-mono"
-                />
+                <div className="field font-mono flex items-center text-foreground-muted">
+                  {limits ? limits.token_budget_per_run.toLocaleString() : "—"}
+                </div>
+                {limits && (
+                  <p className="mt-1 text-[10px] text-foreground-faint">per-run, backend-enforced</p>
+                )}
               </div>
             </div>
             <p className="mt-3 text-[11px] leading-4 text-foreground-faint">
-              Exceeding a ceiling aborts the run rather than degrading it silently. Iteration
-              limits are fixed: harness ≤ 3, patch ≤ 3, clause ≤ 2 — there is no path to an
-              unbounded autonomous loop.
+              Sandbox memory/CPU and the token budget are configured on the backend and applied to
+              every run — you cannot request more here. Runtime is capped to the backend ceiling.
+              Exceeding any of these aborts the run rather than degrading it silently; iteration
+              limits are fixed (harness ≤ {limits?.iteration_limits.harness ?? 3}, patch ≤{" "}
+              {limits?.iteration_limits.patch ?? 3}, clause ≤ {limits?.iteration_limits.clause ?? 2}).
             </p>
           </Panel>
 

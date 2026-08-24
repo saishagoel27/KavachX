@@ -18,6 +18,7 @@ from app.api.deps import client_ip, get_audit, load_run
 from app.audit.service import AuditService
 from app.auth.deps import Permission, Principal, RequirePermission, get_current_principal
 from app.auth.security import decode_token
+from app.config import settings
 from app.core.errors import (
     AuthenticationError,
     BadRequest,
@@ -131,7 +132,9 @@ async def create_run(
         commit_sha=payload.commit_sha,
         analysis_profile=payload.analysis_profile.value,
         execution_profile=payload.execution_profile.value,
-        max_runtime_seconds=payload.max_runtime_seconds,
+        # Clamp to the backend ceiling: the operator's SANDBOX/runtime settings are the authority, so
+        # a request (from the form or a crafted API call) can never allocate more than is configured.
+        max_runtime_seconds=min(payload.max_runtime_seconds, settings.run_max_runtime_seconds),
         resource_budget=payload.resource_budget,
         run_config=_build_run_config(payload),
         status=RunStatus.QUEUED.value,

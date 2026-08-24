@@ -183,6 +183,19 @@ export interface Repository {
   authority_evidence: Record<string, unknown>;
 }
 
+export interface SystemLimits {
+  run_max_runtime_seconds: number;
+  sandbox: {
+    cpu_limit: number;
+    memory_mb: number;
+    pid_limit: number;
+    disk_mb: number;
+    wall_clock_seconds: number;
+  };
+  token_budget_per_run: number;
+  iteration_limits: { harness: number; patch: number; clause: number };
+}
+
 export interface Framework {
   id: string;
   label: string;
@@ -608,7 +621,7 @@ export const endpoints = {
   frameworks: () => api.get<{ frameworks: Framework[] }>("/api/system/frameworks"),
   sandboxInfo: () => api.get<Record<string, any>>("/api/system/sandbox"),
   llmInfo: () => api.get<Record<string, any>>("/api/system/llm"),
-  limits: () => api.get<Record<string, any>>("/api/system/limits"),
+  limits: () => api.get<SystemLimits>("/api/system/limits"),
   shieldInfo: () => api.get<Record<string, any>>("/api/system/shield"),
   ready: () => request<Record<string, any>>("/ready", { auth: false }),
 };
