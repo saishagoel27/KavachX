@@ -35,7 +35,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
+import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -91,6 +94,10 @@ class GvisorSandboxAdapter(SandboxAdapter):
         self.output_dir = self.harness_dir / "out"
         self.seccomp_profile = seccomp_profile
         self._docker: str | None = None
+        #: Whether the image ships GNU ``/usr/bin/time`` (detected once in start()). When present,
+        #: each exec is measured for real peak RSS and CPU; when absent those stay zero — never an
+        #: error, so an un-rebuilt image degrades gracefully instead of breaking runs.
+        self._have_time = False
 
     # ------------------------------------------------------------------
     async def start(self) -> None:
@@ -126,6 +133,19 @@ class GvisorSandboxAdapter(SandboxAdapter):
                 code="SANDBOX_IMAGE_MISSING",
             )
 
+        # Detect GNU time in the image so each exec can be measured for real peak RSS and CPU
+        # (getrusage, which gVisor implements). Fully optional and defensive: any failure here leaves
+        # measurement off, so an image built before `time` was added simply reports zero — it never
+        # breaks the run. Never lets an exception escape start().
+        try:
+            time_probe = await _run(
+                [self._docker, "run", "--rm", self.image, "/usr/bin/time", "--version"],
+                timeout=30,
+            )
+            self._have_time = time_probe.returncode == 0
+        except Exception:
+            self._have_time = False
+
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.harness_dir.mkdir(parents=True, exist_ok=True)
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -140,7 +160,13 @@ class GvisorSandboxAdapter(SandboxAdapter):
         logger.info("sandbox.start", adapter=self.name, image=self.image, session=self.session_id)
 
     # ------------------------------------------------------------------
-    def _docker_argv(self, request: ExecRequest, guard_report_rel: str) -> list[str]:
+    def _docker_argv(
+        self,
+        request: ExecRequest,
+        guard_report_rel: str,
+        rusage_rel: str | None = None,
+        container_name: str | None = None,
+    ) -> list[str]:
         assert self._docker
         pythonpath = ":".join(
             [
@@ -211,6 +237,11 @@ class GvisorSandboxAdapter(SandboxAdapter):
         ]
         if self.seccomp_profile and self.seccomp_profile.is_file():
             argv += ["--security-opt", f"seccomp={self.seccomp_profile}"]
+        # A stable name lets the egress sampler query `docker stats` for this exact container. Only
+        # set for the networked build phase; the untrusted execute path is left byte-for-byte as it
+        # was.
+        if container_name:
+            argv += ["--name", container_name]
 
         # The output directory is always writable via its own bind; the pinned tree is read-only in
         # the execute phase and read-write in the build phase (see source_mount above).
@@ -224,30 +255,66 @@ class GvisorSandboxAdapter(SandboxAdapter):
         for key, value in env.items():
             argv += ["--env", f"{key}={value}"]
         argv.append(self.image)
+        # Measure real peak RSS + CPU with GNU time inside the container (gVisor implements
+        # getrusage). The report goes to the writable output-dir bind — the same dir the guard report
+        # already writes to as 'nobody' — and `time` propagates the command's own exit status, so this
+        # is transparent. Only applied when the image actually has /usr/bin/time (probed in start()).
+        if self._have_time and rusage_rel:
+            argv += ["/usr/bin/time", "-v", "-o", f"{CONTAINER_WORKSPACE}/{rusage_rel}"]
         argv += request.argv
         return argv
 
     async def execute(self, request: ExecRequest) -> ExecResult:
         guard_rel = f"{HARNESS_DIR_NAME}/out/guard-report.{self.execution_count}.json"
-        argv = self._docker_argv(request, guard_rel)
+        rusage_rel = (
+            f"{HARNESS_DIR_NAME}/out/rusage.{self.execution_count}.txt" if self._have_time else None
+        )
+        # Only the networked build phase needs a name + egress sampling; the untrusted execute path
+        # is left exactly as before (no name, no sampler, egress structurally zero).
+        container_name = (
+            f"kavachx-{self.session_id}-{self.execution_count}" if request.allow_network else None
+        )
+        argv = self._docker_argv(request, guard_rel, rusage_rel, container_name)
         timeout = request.timeout_seconds or self.limits.wall_clock_seconds
 
         started = time.perf_counter()
-        completed = await _run(argv, stdin=request.stdin, timeout=timeout)
+        egress_bytes = 0
+        if container_name:
+            # Sample the container's outbound bytes in an isolated daemon thread — no event-loop
+            # involvement, every error swallowed, so it can never affect the run or the server.
+            egress_holder = {"tx": 0}
+            stop = threading.Event()
+            sampler = threading.Thread(
+                target=_egress_sampler,
+                args=(self._docker, container_name, egress_holder, stop),
+                daemon=True,
+            )
+            sampler.start()
+            try:
+                completed = await _run(argv, stdin=request.stdin, timeout=timeout)
+            finally:
+                stop.set()
+                sampler.join(timeout=3)
+            egress_bytes = egress_holder["tx"]
+        else:
+            completed = await _run(argv, stdin=request.stdin, timeout=timeout)
         duration_ms = int((time.perf_counter() - started) * 1000)
 
         guard = _read_json(self.workspace / guard_rel)
+        peak_ram_mb, cpu_seconds = (
+            _parse_rusage(self.workspace / rusage_rel) if rusage_rel else (0, 0.0)
+        )
         result = ExecResult(
             exit_code=completed.returncode,
             stdout=completed.stdout[: request.max_output_bytes],
             stderr=completed.stderr[: request.max_output_bytes],
             duration_ms=duration_ms,
             timed_out=completed.timed_out,
-            peak_ram_mb=0,
-            cpu_seconds=0.0,
-            # In the execute phase no interface exists, so egress is zero by construction. The build
-            # phase (writable, networked) is a trusted provisioning step, not a proof-bearing run.
-            egress_bytes=0,
+            peak_ram_mb=peak_ram_mb,
+            cpu_seconds=cpu_seconds,
+            # Zero and provable in the execute phase (no interface); the real sampled outbound total
+            # in the networked build phase. network_enforced records which case this was.
+            egress_bytes=egress_bytes,
             network_attempts=int(guard.get("network_attempts", 0)),
             network_enforced=not request.allow_network,
             signals=extract_signals(completed.stdout, completed.stderr),
@@ -408,3 +475,87 @@ def _read_json(path: Path) -> dict[str, object]:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
+
+
+def _parse_rusage(path: Path) -> tuple[int, float]:
+    """Parse a GNU ``time -v`` report into ``(peak_ram_mb, cpu_seconds)``.
+
+    Missing or unparseable → ``(0, 0.0)``, so an image without GNU time (or a failed write) simply
+    reports zero rather than affecting the run.
+    """
+    if not path.is_file():
+        return 0, 0.0
+    peak_kb = 0
+    user_s = 0.0
+    sys_s = 0.0
+    try:
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            key, _, value = line.partition(":")
+            key = key.strip().lower()
+            value = value.strip()
+            try:
+                if "maximum resident set size" in key:
+                    peak_kb = int(value)
+                elif key == "user time (seconds)":
+                    user_s = float(value)
+                elif key == "system time (seconds)":
+                    sys_s = float(value)
+            except ValueError:
+                continue
+    except OSError:
+        return 0, 0.0
+    return round(peak_kb / 1024), round(user_s + sys_s, 3)
+
+
+_BYTE_UNITS = {
+    "b": 1,
+    "kb": 1000,
+    "mb": 1000**2,
+    "gb": 1000**3,
+    "tb": 1000**4,
+    "kib": 1024,
+    "mib": 1024**2,
+    "gib": 1024**3,
+    "tib": 1024**4,
+}
+
+
+def _human_to_bytes(value: str) -> int:
+    match = re.match(r"^\s*([0-9.]+)\s*([a-zA-Z]+)\s*$", value)
+    if not match:
+        return 0
+    try:
+        number = float(match.group(1))
+    except ValueError:
+        return 0
+    return int(number * _BYTE_UNITS.get(match.group(2).lower(), 1))
+
+
+def _parse_netio_tx(netio: str) -> int:
+    """Bytes leaving the container from a ``docker stats`` NetIO field (``RX / TX``); TX is egress."""
+    parts = netio.strip().split("/")
+    if len(parts) != 2:
+        return 0
+    return _human_to_bytes(parts[1])
+
+
+def _egress_sampler(docker: str, name: str, holder: dict[str, int], stop: threading.Event) -> None:
+    """Poll a container's outbound bytes from ``docker stats`` until told to stop.
+
+    Runs in an isolated daemon thread. Every failure is swallowed and it holds the peak TX seen, so
+    the worst case is an egress of 0 — it can never affect the run or the backend process.
+    """
+    while not stop.is_set():
+        try:
+            probe = subprocess.run(
+                [docker, "stats", "--no-stream", "--format", "{{.NetIO}}", name],
+                capture_output=True,
+                timeout=15,
+            )
+            if probe.returncode == 0:
+                tx = _parse_netio_tx(probe.stdout.decode("utf-8", errors="replace"))
+                if tx > holder["tx"]:
+                    holder["tx"] = tx
+        except Exception:
+            pass
+        stop.wait(1.5)
