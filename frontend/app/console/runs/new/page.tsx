@@ -137,6 +137,20 @@ function parseBenignRequests(text: string): Record<string, unknown>[] {
   return out;
 }
 
+// Keep at most one row per id. A repository can otherwise appear twice — re-attaching one already
+// in the list, or the API returning it more than once — which produces duplicate React keys.
+function dedupeById<T extends { id: string }>(items: T[]): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const item of items) {
+    if (!seen.has(item.id)) {
+      seen.add(item.id);
+      out.push(item);
+    }
+  }
+  return out;
+}
+
 export default function NewRunPage() {
   const router = useRouter();
   const [repositories, setRepositories] = useState<Repository[] | null>(null);
@@ -175,7 +189,7 @@ export default function NewRunPage() {
           endpoints.repositories(),
           endpoints.projects().catch(() => []),
         ]);
-        setRepositories(list);
+        setRepositories(dedupeById(list));
         setProjects(projectList);
         const verified = list.find((r) => r.authority_verified_at);
         if (verified) {
@@ -225,7 +239,7 @@ export default function NewRunPage() {
   };
 
   const onPublicAttached = (repository: Repository) => {
-    setRepositories((current) => [repository, ...(current ?? [])]);
+    setRepositories((current) => dedupeById([repository, ...(current ?? [])]));
     setRepositoryId(repository.id);
     setBranch(repository.default_branch);
     setShowPublic(false);
