@@ -21,10 +21,11 @@ The architecture supports stronger mechanisms (seccomp profiles, ``LD_PRELOAD`` 
 from __future__ import annotations
 
 import json
+import sys
 import time
 from dataclasses import dataclass, field
-import sys
 from enum import Enum
+
 if sys.version_info >= (3, 11):
     from enum import StrEnum
 else:

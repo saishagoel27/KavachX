@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.api.routes import auth, evidence, runs, system, tenancy
+from app.api.routes import auth, evidence, intelligence, runs, system, tenancy
 from app.config import settings
 from app.core.errors import KavachError
 from app.core.logging import (
@@ -231,6 +231,7 @@ app.include_router(auth.router, prefix=settings.api_prefix)
 app.include_router(tenancy.router, prefix=settings.api_prefix)
 app.include_router(runs.router, prefix=settings.api_prefix)
 app.include_router(evidence.router, prefix=settings.api_prefix)
+app.include_router(intelligence.router, prefix=settings.api_prefix)
 app.include_router(system.router, prefix=settings.api_prefix)
 app.include_router(system.health_router)
 

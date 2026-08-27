@@ -13,17 +13,23 @@ from typing import Any
 
 from app.events.bus import RunEventBus, bus
 from app.events.schemas import (
+    ArchitectureEvent,
     ArtifactEvent,
     CertificateEvent,
     ClauseEvent,
+    CoverageEvent,
     DiffEvent,
     FindingEvent,
     GauntletEvent,
+    IndexEvent,
     LogEvent,
     MetricEvent,
     PhaseEvent,
+    SecurityFlowEvent,
     ShieldEvent,
     StatusEvent,
+    TestResultEvent,
+    TestSpecEvent,
     ThoughtEvent,
     ToolEvent,
 )
@@ -47,6 +53,32 @@ class RunEmitter:
 
     async def _emit(self, event: Any) -> int:
         return await self.bus.publish(run_id=self.run_id, tenant_id=self.tenant_id, event=event)
+
+    # --- code intelligence -----------------------------------------------
+    async def index(self, **fields: Any) -> None:
+        """Index health. Emitted once, after INDEX completes."""
+        await self._emit(IndexEvent(**fields))
+
+    async def security_flow(self, **fields: Any) -> None:
+        """One evidenced source→sink flow, with its basis and precision."""
+        await self._emit(SecurityFlowEvent(**fields))
+
+    async def architecture(self, **fields: Any) -> None:
+        """The structured application model and attack-surface summary."""
+        await self._emit(ArchitectureEvent(**fields))
+
+    async def testspec(self, **fields: Any) -> None:
+        """A generated harness, with the security property it tries to violate."""
+        await self._emit(TestSpecEvent(**fields))
+
+    async def test_result(self, **fields: Any) -> None:
+        """The oracle's verdict on one harness execution."""
+        await self._emit(TestResultEvent(**fields))
+
+    async def coverage(self, **fields: Any) -> None:
+        """A coverage-guided campaign's outcome."""
+        await self._emit(CoverageEvent(**fields))
+
 
     # --- phases -----------------------------------------------------------
     async def phase(self, phase: str, status: str, detail: str = "") -> None:

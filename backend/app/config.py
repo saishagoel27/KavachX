@@ -67,7 +67,9 @@ class Settings(BaseSettings):
     # groq  : hosted Groq inference (default)
     # llama : llama.cpp / any OpenAI-compatible server — the local, air-gapped path
     # mock  : deterministic scripted proposer (offline, used by the test suite)
-    llm_provider: Literal["groq", "llama", "mock"] = "groq"
+    llm_provider: Literal[
+        "groq", "llama", "ollama", "vllm", "openai_compatible", "mock"
+    ] = "groq"
     llm_timeout_seconds: int = 120
     llm_max_retries: int = 2
     llm_max_output_tokens: int = 2048
@@ -84,12 +86,84 @@ class Settings(BaseSettings):
     groq_model_router: str = "llama-3.1-8b-instant"
     groq_model_security: str = "openai/gpt-oss-120b"
 
-    # llama.cpp / OpenAI-compatible local server
+    # llama.cpp / OpenAI-compatible local server — the air-gapped path.
+    #
+    # Model names are deliberately configuration, not code. The defaults name the Qwen3-Coder
+    # family because it is currently the strongest open-weight coding family that runs
+    # self-hosted, but nothing in KavachX depends on them: see app/llm/openai_compatible.py.
     llama_base_url: str = "http://localhost:8080/v1"
     llama_api_key: str = ""
     llama_model_workhorse: str = "Qwen3-Coder-30B-A3B"
     llama_model_router: str = "Qwen3-4B"
-    llama_model_security: str = "Foundation-Sec-8B-Reasoning"
+    llama_model_security: str = "Qwen3-Coder-30B-A3B"
+
+    # Ollama (OpenAI-compatible surface). Models are Ollama tags.
+    ollama_base_url: str = "http://localhost:11434/v1"
+    ollama_api_key: str = ""
+    ollama_model_workhorse: str = "qwen3-coder:30b"
+    ollama_model_router: str = "qwen3:4b"
+    ollama_model_security: str = "qwen3-coder:30b"
+
+    # vLLM
+    vllm_base_url: str = "http://localhost:8000/v1"
+    vllm_api_key: str = ""
+    vllm_model_workhorse: str = "Qwen/Qwen3-Coder-30B-A3B-Instruct"
+    vllm_model_router: str = "Qwen/Qwen3-4B"
+    vllm_model_security: str = "Qwen/Qwen3-Coder-30B-A3B-Instruct"
+
+    # Any other OpenAI-compatible endpoint. Pointing this at a hosted service means the
+    # reasoning path is no longer offline; /api/system/llm reports that.
+    openai_compatible_base_url: str = ""
+    openai_compatible_api_key: str = ""
+    openai_compatible_model_workhorse: str = ""
+    openai_compatible_model_router: str = ""
+    openai_compatible_model_security: str = ""
+
+    # --- code intelligence / indexing --------------------------------------
+    #: Cap on files handed to the indexers. A hostile or vendored tree can be arbitrarily large,
+    #: and an unbounded parse is a denial-of-service against our own run.
+    index_max_files: int = 4000
+
+    # GitNexus — the code knowledge graph provider (github.com/abhigyanpatwari/GitNexus).
+    #
+    # Optional by design. When it is absent KavachX indexes with tree-sitter alone, every
+    # relationship is a name match rather than a resolved reference, and the index health report
+    # caps the grade and records the bound. That degradation is honest and supported; it is also
+    # why KavachX is not welded to GitNexus's PolyForm Noncommercial licence — see
+    # docs/CODE_GRAPH.md.
+    gitnexus_enabled: bool = True
+    #: Explicit path to the binary. Highest authority in the resolution chain:
+    #: GITNEXUS_BIN -> PATH -> <repo>/node_modules/.bin -> npx (opt-in).
+    gitnexus_bin: str = ""
+    #: Version used when resolving through npx, and recorded in the index identity.
+    gitnexus_version: str = "1.6.9"
+    #: Allow falling back to `npx -y gitnexus@<version>`. Off by default: it reaches the network
+    #: on first use per machine, and an indexer that downloads packages mid-run is not something
+    #: a security tool should do unasked.
+    gitnexus_allow_npx: bool = False
+    #: LadybugDB optional-extension policy. "load-only" keeps indexing offline; KavachX uses the
+    #: graph, not GitNexus's full-text or vector search, so the degradation costs nothing.
+    gitnexus_extension_install: Literal["auto", "load-only", "never"] = "load-only"
+    #: Skip grammars needing native compilation (Dart/Swift/Kotlin/Proto). Those languages are
+    #: then simply not indexed by GitNexus, which the health report reports.
+    gitnexus_skip_optional_grammars: bool = True
+    #: Build the CFG/PDG substrate. Enables statement-level dependence queries at real time cost.
+    gitnexus_pdg: bool = False
+    gitnexus_max_file_size_kb: int = 512
+    #: Parse worker pool size. 0 leaves GitNexus's own default (cores-1, capped at 16).
+    gitnexus_workers: int = 0
+    gitnexus_probe_timeout_seconds: int = 60
+    gitnexus_analyze_timeout_seconds: int = 900
+    gitnexus_query_timeout_seconds: int = 120
+    #: Row cap per Cypher query. Bounds memory on a large repository.
+    gitnexus_max_rows: int = 200_000
+
+    # --- security model ----------------------------------------------------
+    #: Optional JSON file of extra source/sink/sanitizer/validator/control rules, merged over the
+    #: built-in taxonomy. A rule reusing a built-in id replaces it, which is how a deployment
+    #: tightens or silences a noisy shipped rule without forking KavachX.
+    #: See docs/SECURITY_MODEL.md for the file shape.
+    security_taxonomy_path: str = ""
 
     # --- sandbox -----------------------------------------------------------
     sandbox_adapter: Literal["dev", "gvisor", "firecracker"] = "dev"
@@ -207,6 +281,29 @@ class Settings(BaseSettings):
                 "router": self.llama_model_router,
                 "security": self.llama_model_security,
             }
+        if self.llm_provider == "ollama":
+            return {
+                "workhorse": self.ollama_model_workhorse,
+                "router": self.ollama_model_router,
+                "security": self.ollama_model_security,
+            }
+        if self.llm_provider == "vllm":
+            return {
+                "workhorse": self.vllm_model_workhorse,
+                "router": self.vllm_model_router,
+                "security": self.vllm_model_security,
+            }
+        if self.llm_provider == "openai_compatible":
+            # No sensible default exists for an arbitrary endpoint: the operator must name the
+            # model. An empty value surfaces in /api/system/llm as a missing configuration
+            # rather than producing a 404 at the first model call.
+            return {
+                "workhorse": self.openai_compatible_model_workhorse,
+                "router": self.openai_compatible_model_router
+                or self.openai_compatible_model_workhorse,
+                "security": self.openai_compatible_model_security
+                or self.openai_compatible_model_workhorse,
+            }
         return {"workhorse": "mock-proposer", "router": "mock-router", "security": "mock-sec"}
 
     @property
@@ -215,6 +312,14 @@ class Settings(BaseSettings):
             return bool(self.groq_api_key)
         if self.llm_provider == "llama":
             return bool(self.llama_base_url)
+        if self.llm_provider == "ollama":
+            return bool(self.ollama_base_url)
+        if self.llm_provider == "vllm":
+            return bool(self.vllm_base_url)
+        if self.llm_provider == "openai_compatible":
+            return bool(
+                self.openai_compatible_base_url and self.openai_compatible_model_workhorse
+            )
         return True
 
     @property
@@ -228,6 +333,9 @@ class Settings(BaseSettings):
             "certificate_signing_key",
             "groq_api_key",
             "llama_api_key",
+            "ollama_api_key",
+            "vllm_api_key",
+            "openai_compatible_api_key",
             "github_token",
             "demo_user_password",
             "database_url",

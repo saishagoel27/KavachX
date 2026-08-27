@@ -68,7 +68,100 @@ export type RunEvent =
     }
   | { t: "certificate"; finding: string; level: string; certificate_hash: string; certificate_id: string }
   | { t: "status"; status: string; detail: string }
-  | { t: "log"; stream: "stdout" | "stderr" | "system"; line: string; source: string };
+  | { t: "log"; stream: "stdout" | "stderr" | "system"; line: string; source: string }
+  // --- code intelligence ---------------------------------------------------
+  | {
+      t: "index";
+      index_id: string;
+      status: string;
+      graph_source: string;
+      files_discovered: number;
+      files_indexed: number;
+      files_skipped: number;
+      symbols: number;
+      relationships: number;
+      resolved_relationships: number;
+      entrypoints: number;
+      tests: number;
+      configs: number;
+      dependencies: number;
+      health_grade: string;
+      duration_ms: number;
+    }
+  | {
+      t: "security_flow";
+      ref: string;
+      source_kind: string;
+      sink_kind: string;
+      severity: string;
+      cwe: string;
+      /** taint | call-graph | proximity — what the flow is actually evidenced by. */
+      basis: string;
+      /** resolved | union — which call edges the path was allowed to use. */
+      precision: string;
+      confidence: number;
+      reachable: boolean;
+      sanitized: boolean;
+      path: string[];
+      boundaries: string[];
+    }
+  | {
+      t: "architecture";
+      application_type: string;
+      languages: Record<string, number>;
+      frameworks: string[];
+      entrypoints: number;
+      unauthenticated_entrypoints: number;
+      data_stores: string[];
+      authentication: string[];
+      trust_boundaries: string[];
+      surface_items: number;
+      externally_controllable: number;
+      testable: number;
+      /** False when no entrypoint existed, so the surface is unknown rather than empty. */
+      measured: boolean;
+      gaps: string[];
+    }
+  | {
+      t: "testspec";
+      plan_id: string;
+      candidate: string;
+      strategy: string;
+      engine: string;
+      oracle: string;
+      harness_path: string;
+      harness_hash: string;
+      security_property: string;
+      proposed_by: "model" | "deterministic";
+    }
+  | {
+      t: "test_result";
+      plan_id: string;
+      candidate: string;
+      strategy: string;
+      engine: string;
+      reproduced: boolean;
+      reproduction_count: number;
+      required: number;
+      oracle: string;
+      evidence: string;
+      coverage_percent: number;
+      error: string;
+    }
+  | {
+      t: "coverage";
+      candidate: string;
+      percent: number;
+      corpus_size: number;
+      executions: number;
+      rounds: number;
+      new_findings: number;
+      uncovered_branches: number;
+      /** How many model-proposed inputs actually reached new coverage, vs how many it proposed. */
+      model_candidates: number;
+      model_candidates_useful: number;
+      stopped_because: string;
+    };
 
 export interface Enveloped {
   seq: number;
@@ -77,7 +170,43 @@ export interface Enveloped {
   event: RunEvent;
 }
 
+/**
+ * Every phase, in execution order. Mirrors `Phase` in `app/models/enums.py`, whose member order
+ * is `PHASE_ORDER` — keep the two in step, because a timeline ordered differently from the
+ * pipeline would misrepresent what ran when.
+ */
 export const PIPELINE_PHASES = [
+  "ingest",
+  "index",
+  "index_validate",
+  "security_model",
+  "understand",
+  "probe",
+  "world_model",
+  "samhita",
+  "discovery",
+  "hypothesis_queue",
+  "test_synthesis",
+  "execute",
+  "validation",
+  "shield",
+  "root_cause",
+  "regression",
+  "patch",
+  "blast_radius",
+  "gauntlet",
+  "pramaan",
+  "publish",
+] as const;
+
+/**
+ * The phases that existed before the code-intelligence layer. Mirrors `LEGACY_PHASE_ORDER`.
+ *
+ * A run recorded by an older build has no key for the newer stages, and rendering them would show
+ * five stages stuck on "pending" forever — which reads as "these failed" rather than "this run
+ * predates them". {@link phasesForRun} picks the right list.
+ */
+export const LEGACY_PIPELINE_PHASES = [
   "ingest",
   "probe",
   "index",
@@ -95,17 +224,45 @@ export const PIPELINE_PHASES = [
   "publish",
 ] as const;
 
+/** Phases only a code-intelligence build emits. Their presence dates a run. */
+const INTELLIGENCE_PHASES = [
+  "index_validate",
+  "security_model",
+  "understand",
+  "test_synthesis",
+  "execute",
+  "regression",
+] as const;
+
+/**
+ * Which phase list to render for this run: the full pipeline, or the legacy one.
+ *
+ * Decided from the recorded `phase_status` keys rather than from a build version, because the keys
+ * are what the run actually wrote.
+ */
+export function phasesForRun(phaseStatus: Record<string, unknown> | null | undefined): readonly string[] {
+  if (!phaseStatus) return PIPELINE_PHASES;
+  const known = INTELLIGENCE_PHASES.some((phase) => phase in phaseStatus);
+  return known ? PIPELINE_PHASES : LEGACY_PIPELINE_PHASES;
+}
+
 export const PHASE_LABELS: Record<string, string> = {
   ingest: "Ingest",
-  probe: "Probe",
   index: "Index",
+  index_validate: "Index Validation",
+  security_model: "Security Model",
+  understand: "Understand",
+  probe: "Probe",
   world_model: "World Model",
   samhita: "SAMHITA",
   discovery: "Discovery",
   hypothesis_queue: "Hypothesis Queue",
+  test_synthesis: "Test Synthesis",
+  execute: "Execute",
   validation: "Validation",
   shield: "Shield",
   root_cause: "Root Cause",
+  regression: "Regression",
   patch: "Patch",
   blast_radius: "Blast Radius",
   gauntlet: "Refutation Gauntlet",

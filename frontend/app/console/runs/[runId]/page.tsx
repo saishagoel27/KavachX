@@ -5,6 +5,15 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import {
+  ArchitecturePanel,
+  CodeGraphPanel,
+  IndexHealthPanel,
+  IntelligenceLiveStrip,
+  ModelContextPanel,
+  SecurityModelPanel,
+  TestSynthesisPanel,
+} from "@/components/intel-panels";
 import { useMe } from "@/components/shell";
 import {
   ContractPanel,
@@ -45,6 +54,7 @@ import {
   eventsOfType,
   formatBytes,
   latestMetric,
+  phasesForRun,
   useRunStream,
 } from "@/lib/events";
 
@@ -179,10 +189,16 @@ export default function RunConsolePage() {
   const tabs = [
     { id: "live", label: "Live" },
     { id: "mission", label: "Security Mission" },
+    { id: "index", label: "Index" },
+    { id: "graph", label: "Code Graph" },
+    { id: "security", label: "Security Model" },
+    { id: "architecture", label: "Architecture" },
+    { id: "tests", label: "Tests" },
     { id: "findings", label: "Findings", count: findings.length },
     { id: "contract", label: "SAMHITA", count: clauses.filter((c) => c.status === "SURVIVING").length },
     { id: "patches", label: "Patches", count: patches.length },
     { id: "gauntlet", label: "Gauntlet", count: gauntlets.length },
+    { id: "context", label: "Model Context" },
     { id: "evidence", label: "Evidence" },
     { id: "artifacts", label: "Artifacts", count: run.artifacts.length },
   ];
@@ -342,9 +358,14 @@ export default function RunConsolePage() {
       {tab === "live" && (
         <div className="space-y-4">
           <div className="grid gap-4 xl:grid-cols-2">
-            <PipelineTimeline phases={phases} detail={phaseDetail} />
+            <PipelineTimeline
+              phases={phases}
+              detail={phaseDetail}
+              order={phasesForRun(run.phase_status as Record<string, unknown>)}
+            />
             <ReasoningTrace events={stream.events} />
           </div>
+          <IntelligenceLiveStrip events={stream.events} />
           <ResourceMeter
             run={run}
             metric={metric}
@@ -357,6 +378,13 @@ export default function RunConsolePage() {
           </div>
         </div>
       )}
+
+      {tab === "index" && <IndexHealthPanel runId={runId} />}
+      {tab === "graph" && <CodeGraphPanel runId={runId} />}
+      {tab === "security" && <SecurityModelPanel runId={runId} />}
+      {tab === "architecture" && <ArchitecturePanel runId={runId} />}
+      {tab === "tests" && <TestSynthesisPanel runId={runId} />}
+      {tab === "context" && <ModelContextPanel runId={runId} />}
 
       {tab === "mission" && (
         <SecurityMissionPanel

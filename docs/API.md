@@ -261,6 +261,20 @@ refresh loses nothing.
 | `artifact` | `kind`, `url`, `name`, `hash` |
 | `status` | `status`, `detail` |
 | `log` | `stream` (`stdout`/`stderr`/`system`), `line`, `source` |
+| `index` | `index_id`, `status`, `graph_source`, `files_discovered/indexed/skipped`, `symbols`, `relationships`, `resolved_relationships`, `entrypoints`, `tests`, `configs`, `dependencies`, `health_grade`, `duration_ms` |
+| `security_flow` | `ref`, `source_kind`, `sink_kind`, `severity`, `cwe`, `basis`, `precision`, `confidence`, `reachable`, `sanitized`, `path[]`, `boundaries[]` |
+| `architecture` | `application_type`, `languages`, `frameworks[]`, `entrypoints`, `unauthenticated_entrypoints`, `data_stores[]`, `authentication[]`, `trust_boundaries[]`, `surface_items`, `externally_controllable`, `testable`, `measured`, `gaps[]` |
+| `testspec` | `plan_id`, `candidate`, `strategy`, `engine`, `oracle`, `harness_path`, `harness_hash`, `security_property`, `proposed_by` (`model`/`deterministic`) |
+| `test_result` | `plan_id`, `candidate`, `strategy`, `engine`, `reproduced`, `reproduction_count`, `required`, `oracle`, `evidence`, `coverage_percent`, `error` |
+| `coverage` | `candidate`, `percent`, `corpus_size`, `executions`, `rounds`, `new_findings`, `uncovered_branches`, `model_candidates`, `model_candidates_useful`, `stopped_because` |
+
+Three fields in that block are load-bearing for reading a result correctly:
+
+- `security_flow.basis` (`taint` / `call-graph` / `proximity`) and `security_flow.precision`
+  (`resolved` / `union`) — a taint-proven flow and a name-matched call path are not the same claim.
+- `architecture.measured` — `false` means the attack surface is **unknown**, not empty.
+- `coverage.model_candidates_useful` vs `model_candidates` — the measured score for the model's
+  contribution to a fuzzing campaign, rather than its self-assessment.
 
 A `thought` event carries an **application-composed summary** plus evidence handles. There is no
 field for raw model output or hidden deliberation, and a test asserts the schema has exactly six
@@ -288,6 +302,51 @@ clients that would rather poll.
 
 `pov_access` is `granted` or `withheld` on every finding response, so a client never has to guess
 whether it is looking at redacted data.
+
+---
+
+## Code intelligence
+
+Every endpoint here is a **projection of what a run already recorded**. Nothing recomputes on
+request: a run's evidence is whatever it wrote at the time, and recomputing it now against a
+different tree or a different GitNexus version would produce a different answer while looking like
+the same one.
+
+| Method | Path | Permission | Notes |
+| --- | --- | --- | --- |
+| `GET` | `/api/runs/{id}/index` | `run:read` | Index identity, provider provenance, counters, health grade, **claim bounds** |
+| `GET` | `/api/runs/{id}/graph?uid=&depth=&limit=` | `run:read` | A **bounded subgraph**. With no `uid`, statistics plus entrypoints |
+| `GET` | `/api/runs/{id}/security` | `run:read` | Sources, sinks, sanitizers, controls, trust boundaries, flows, taxonomy provenance, parse errors |
+| `GET` | `/api/runs/{id}/architecture` | `run:read` | The application model and ranked attack surface with per-item factors |
+| `GET` | `/api/runs/{id}/tests` | `run:read` | Every generated plan (spec, engine, harness hash, `proposed_by`) and every execution record |
+| `GET` | `/api/runs/{id}/contexts` | `run:read` | Every model context, newest first |
+| `GET` | `/api/runs/{id}/contexts/{context_hash}` | `run:read` | One context in full, including every graph query it made |
+
+`/graph` **never returns the whole graph.** The useful views are focused subgraphs around a finding,
+an entrypoint, a function, a sink or a trust boundary, and `uid` + `depth` provide them.
+
+`/contexts` returns the **selection** a model received — files, functions, code-slice keys, the tool
+log, the budget, what was used per section, and what was **dropped** — never a raw prompt. Code
+slices are recoverable from the pinned tree plus the recorded line ranges, so copying target source
+into a second store would add risk without adding information.
+
+An unavailable projection returns `{"available": false, "reason": "..."}` rather than an empty
+object, so a run that predates a stage cannot be mistaken for a run where the stage found nothing.
+
+### Certificate additions
+
+`GET /api/certificates/{id}` now carries two extra top-level blocks:
+
+- **`code_intelligence`** — the index id, provider provenance, `resolved_relationship_ratio`, health
+  grade and claim bounds, the architecture summary, the security flow with its basis and precision,
+  the test specifications with harness hashes, the execution records with their environment, and the
+  coverage bound. When the intelligence stages did not contribute it is
+  `{"available": false, "reason": "..."}`.
+- **`explains`** — direct answers to the nine "how do you know?" questions
+  (`where_is_the_vulnerability`, `why_is_the_path_reachable`, `what_input_controls_it`,
+  `what_sink_is_reached`, `what_test_proves_it`, `what_happened_during_execution`, `coverage_bound`,
+  `index_bound`). Every answer restates a stored evidence node; where evidence is absent the answer
+  is `NOT ESTABLISHED — <reason>`.
 
 ---
 
@@ -341,7 +400,17 @@ somebody else's repository. The patch and certificate remain downloadable as run
 | `GET` | `/api/system/shield` | Which shield mechanisms are implemented versus architectural |
 | `GET` | `/api/system/limits` | Iteration ceilings, sandbox limits, token budget |
 | `GET` | `/api/system/config` | Redacted settings snapshot — every secret replaced |
+| `GET` | `/api/system/engines` | Test/fuzz engine inventory: available, unavailable (with what is missing), unimplemented |
+| `GET` | `/api/system/gitnexus` | Provider availability, resolution order, version, **licence**, and the degradation if absent |
 
 `/api/system/sandbox` is worth calling before you trust a result. It reports
 `suitable_for_untrusted_code` and `network_enforced` per adapter, and `honest_warning` when the
 active adapter is not an isolation boundary.
+
+`/api/system/engines` is worth calling for the same reason: an **unavailable** engine means the
+corresponding strategy did **NOT RUN**, and it is never reported as a clean result. It probes the
+*host*; a run re-probes the sandbox image (the interpreter a harness actually runs in) and records
+that per run, which is the authoritative answer where the two differ.
+
+`/api/system/gitnexus` reports that GitNexus is licensed **PolyForm Noncommercial 1.0.0** and what
+KavachX does without it — see [CODE_GRAPH.md](CODE_GRAPH.md).

@@ -28,6 +28,81 @@ Node types: `vulnerability`, `discovery_channel`, `samhita_clause`, `code_locati
 `reproduction`, `shield`, `patch`, `gauntlet_result`, `blast_radius`, `world_model`,
 `sandbox_execution`, `certificate`.
 
+### Code-intelligence evidence
+
+A certificate is only as good as what it lets a reader check. Previously one could say "the finding
+is reachable" and point at a world-model hash — a digest of a graph the reader cannot interrogate,
+built by an indexer whose fidelity was not recorded.
+
+[`pramaan/intel_evidence.py`](../backend/app/pramaan/intel_evidence.py) adds nodes into the **same**
+graph, so the dangling-claim refusal covers them too:
+
+```
+Vulnerability V02
+ ├── code_evidence     → repository index      (id, providers, versions, resolved ratio)
+ ├── code_evidence     → index health          (grade + claim bounds)
+ ├── code_evidence     → code knowledge graph  (hash, counts, provenance)
+ ├── code_evidence     → application model     (type, frameworks, boundaries, gaps)
+ ├── code_evidence     → security flow         (source → sink, basis, precision, sanitizers)
+ ├── scoped_by         → attack surface        (measured?, ranked counts)
+ ├── exploit_evidence  → test specification    (strategy, oracle, property, engine)
+ │                        └── exploit_evidence → generated harness (path + sha256)
+ │                              └── verified_by → test execution (command, env, attempts)
+ ├── runtime_evidence  → test execution        (per-attempt exit codes + output hashes)
+ ├── runtime_evidence  → coverage              (percent, or an explicit NOT MEASURED)
+ └── discovered_by     → model context         (files, functions, tool calls, what was dropped)
+```
+
+The design rule throughout: **an absence is recorded as an absence.** A certificate for a run where
+coverage was never measured says `coverage NOT MEASURED` with the reason, rather than omitting the
+field and letting a reader assume.
+
+### What this qualifies
+
+Three fields now bound every reachability claim a certificate makes:
+
+| Field | On the demo, with GitNexus | Without |
+| --- | --- | --- |
+| `index.graph_source` | `gitnexus+tree-sitter` | `tree-sitter` |
+| `index.resolved_relationship_ratio` | `0.59` | `0.0` |
+| `index_health.claim_bounds` | 1 bound | 2 bounds |
+
+`graph_source` is **derived from actual provider contribution**, never asserted. The end-to-end test
+asserts that every provider it names is listed as a contributor — a regression guard for a real bug
+in which any host with a `gitnexus` binary on `PATH` produced certificates claiming
+`gitnexus+tree-sitter` without GitNexus ever being invoked. See [CODE_GRAPH.md](CODE_GRAPH.md).
+
+A flow's `basis` and `precision` travel with it, because a taint-proven flow and a name-matched call
+path are **not the same claim**.
+
+### "How do you know?"
+
+`explains()` answers the spec's §59 questions directly in the document, so a reader does not have to
+reassemble them from the graph:
+
+```json
+{
+  "where_is_the_vulnerability": "src/reportsvc/exporter.py:40, root cause at
+      src/reportsvc/exporter.py:24 (root cause verified on the executed path)",
+  "why_is_the_path_reachable": "A call path from entrypoint src/main.py:main at union
+      precision, established by call-graph. 59% of the index's relationships were resolved
+      by a symbol-resolving indexer; the remainder are name matches.",
+  "what_input_controls_it": "cli_arg crossing cli_to_application, application_to_shell",
+  "what_sink_is_reached": "shell_exec, with no sanitizer on the path",
+  "what_test_proves_it": "mutation harness via kx-mutational (plan c8d66d325df2),
+      reproduced 2x",
+  "what_happened_during_execution": "The oracle fired in 2 of 2 independent executions
+      (required 2). Adapter dev, network_enforced=False.",
+  "coverage_bound": "20.0% of statements executed; code that did not run was not
+      dynamically verified.",
+  "index_bound": "a precise reachability claim — paths at 'union' precision may include
+      calls that cannot actually occur"
+}
+```
+
+Every answer is a restatement of a stored evidence node. Where the evidence is absent, the answer is
+`NOT ESTABLISHED — <reason>` rather than being omitted.
+
 Relations: `discovered_by`, `violated_clause`, `code_evidence`, `runtime_evidence`,
 `exploit_evidence`, `shielded_by`, `repaired_by`, `verified_by`, `scoped_by`, `executed_in`,
 `attests`, `supersedes`.
@@ -49,6 +124,9 @@ evidence it cites without the hashes changing.
 2. **The finding was never reproduced** and the grade is not Level R.
 
 Refusal is logged and the run continues without that certificate. Nothing weaker is emitted.
+
+Because the code-intelligence nodes go into the same graph, the same refusal applies to them: a
+certificate that cites an index, a flow, a harness or an execution **must** have a node for each.
 
 ### Shared nodes
 

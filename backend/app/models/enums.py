@@ -6,6 +6,7 @@ SQL during an incident. Every state machine in KavachX is expressed here.
 
 import sys
 from enum import Enum
+
 if sys.version_info >= (3, 11):
     from enum import StrEnum
 else:
@@ -32,18 +33,42 @@ class RunStatus(StrEnum):
 
 
 class Phase(StrEnum):
-    """The 15 pipeline stages surfaced in the console timeline."""
+    """The pipeline stages surfaced in the console timeline.
+
+    Every pre-existing value is preserved verbatim so that runs recorded before the code
+    intelligence layer existed still render, and so ``phase_status`` maps stored on old rows keep
+    their keys. The new stages are inserted at the points where the work actually happens.
+    """
 
     INGEST = "ingest"
-    PROBE = "probe"
+    #: Repository indexing: GitNexus + tree-sitter merged into one code knowledge graph.
     INDEX = "index"
+    #: Deterministic index validation and the index health report.
+    INDEX_VALIDATE = "index_validate"
+    #: Sources, sinks, sanitizers, trust boundaries and data flows over the code graph.
+    SECURITY_MODEL = "security_model"
+    #: The structured application model and attack surface.
+    UNDERSTAND = "understand"
+    # Declared *after* the two stages above because that is the order they run in: the probe uses
+    # the graph's entrypoints, so understanding happens first. Member order is what PHASE_ORDER
+    # exports, and the console renders its timeline from it — a declaration order that disagreed
+    # with execution order would draw a timeline that lies about what ran when.
+    PROBE = "probe"
     WORLD_MODEL = "world_model"
     SAMHITA = "samhita"
     DISCOVERY = "discovery"
     HYPOTHESIS_QUEUE = "hypothesis_queue"
+    #: Candidate -> TestSpec -> generated harness.
+    TEST_SYNTHESIS = "test_synthesis"
+    #: Harness execution in the sandbox, with coverage feedback.
+    EXECUTE = "execute"
     VALIDATION = "validation"
     SHIELD = "shield"
     ROOT_CAUSE = "root_cause"
+    #: The reproduced exploit preserved as a durable test. Before PATCH, because the regression
+    #: test is built from the reproduction record and must be shown to fire on the *unpatched*
+    #: build — a test that has never fired is not a guard.
+    REGRESSION = "regression"
     PATCH = "patch"
     BLAST_RADIUS = "blast_radius"
     GAUNTLET = "gauntlet"
@@ -52,6 +77,26 @@ class Phase(StrEnum):
 
 
 PHASE_ORDER: list[str] = [p.value for p in Phase]
+
+#: Phases that existed before the code-intelligence upgrade. Used by the console to render a run
+#: recorded by an older build without showing the newer stages as perpetually "pending".
+LEGACY_PHASE_ORDER: list[str] = [
+    Phase.INGEST.value,
+    Phase.PROBE.value,
+    Phase.INDEX.value,
+    Phase.WORLD_MODEL.value,
+    Phase.SAMHITA.value,
+    Phase.DISCOVERY.value,
+    Phase.HYPOTHESIS_QUEUE.value,
+    Phase.VALIDATION.value,
+    Phase.SHIELD.value,
+    Phase.ROOT_CAUSE.value,
+    Phase.PATCH.value,
+    Phase.BLAST_RADIUS.value,
+    Phase.GAUNTLET.value,
+    Phase.PRAMAAN.value,
+    Phase.PUBLISH.value,
+]
 
 
 class PhaseStatus(StrEnum):

@@ -90,10 +90,12 @@ def build_provider(
             from app.llm.groq_provider import GroqProvider
 
             real: LLMProvider = GroqProvider(budget=budget)
-        elif name == "llama":
-            from app.llm.llama_provider import LocalLlamaProvider
+        elif name in ("llama", "ollama", "vllm", "openai_compatible"):
+            # One implementation, four presets. See app/llm/openai_compatible.py for why these
+            # are not four providers.
+            from app.llm.openai_compatible import OpenAICompatibleProvider
 
-            real = LocalLlamaProvider(budget=budget)
+            real = OpenAICompatibleProvider(preset=name, budget=budget)
         else:
             raise ModelUnavailable(f"Unknown LLM provider {name!r}.")
     except Exception as exc:
@@ -126,8 +128,12 @@ async def provider_health(provider_name: str | None = None) -> dict[str, Any]:
     provider = build_provider(provider_name=name, allow_fallback=False)
     try:
         health = getattr(provider, "health", None)
-        if health is None:
-            return {"provider": name, "reachable": True}
-        return await health()
+        report = {"provider": name, "reachable": True} if health is None else await health()
+        # The routing table travels with the health report so an operator can see, in one place,
+        # which model each task would actually use.
+        from app.llm.routing import routing_table
+
+        report["routing"] = routing_table()
+        return report
     finally:
         await provider.aclose()

@@ -9,17 +9,25 @@ is ``path:qualname``. When the reasoning layer needs source, it asks
 poured into a prompt, so context cost stays flat as the target grows and repository text can
 never act as an instruction.
 
-GitNexus is used for the call graph when it is present on the host; otherwise the graph is
-built from the tree-sitter call sites. Which one produced the graph is recorded in
-``graph_source`` and travels into the certificate, because the fidelity of the reachability
-claim depends on it.
+The call graph here is built from tree-sitter call sites, resolved **by name**. It
+over-approximates, and that is deliberate: a conservative caller set makes reachability
+pessimistic, which is the safe direction.
+
+``graph_source`` is set by the orchestrator from the real index job (see
+:mod:`app.indexing.merge`), which records which providers actually contributed nodes and edges.
+It is never inferred from a binary being present on the host: an earlier version of this module
+labelled every run ``gitnexus+tree-sitter`` whenever a ``gitnexus`` executable existed on PATH,
+without ever invoking it — a false provenance claim that travelled into certificates, where the
+fidelity of every reachability claim depends on exactly this field.
+
+The resolved code knowledge graph lives in :mod:`app.indexing`; this model remains the structure
+the static channel, root-cause verification, blast radius and the sibling hunt query.
 """
 
 from __future__ import annotations
 
 import json
 import re
-import shutil
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -327,25 +335,10 @@ def build_world_model(root: Path) -> WorldModel:
     _collect_deployment(model)
     _collect_config_signals(model)
 
-    if _gitnexus_available():
-        model.graph_source = "gitnexus+tree-sitter"
-
     logger.info(
         "world_model.built", **{k: v for k, v in model.summary().items() if k != "index_summary"}
     )
     return model
-
-
-def _gitnexus_available() -> bool:
-    """GitNexus enriches the call graph when installed. Absence is not a failure."""
-    if shutil.which("gitnexus"):
-        return True
-    try:
-        import importlib.util
-
-        return importlib.util.find_spec("gitnexus") is not None
-    except (ImportError, ValueError):
-        return False
 
 
 def _build_call_graph(model: WorldModel) -> None:

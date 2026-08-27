@@ -516,6 +516,326 @@ export interface PublishResult {
 }
 
 // ---------------------------------------------------------------------------
+// Code intelligence.
+//
+// Every one of these is a projection of what a run *recorded*, never a recomputation. So each can
+// come back unavailable — for a run that predates the stage, or one that failed before reaching
+// it — and the shape says so explicitly rather than returning an empty object that would read as
+// "the stage ran and found nothing".
+export interface Unavailable {
+  available: false;
+  reason: string;
+}
+
+export type Projection<T> = ({ available: true } & T) | Unavailable;
+
+export interface IndexHealthCheck {
+  id: string;
+  severity: "ok" | "warn" | "fail" | string;
+  title: string;
+  detail: string;
+  /** What this check forbids the run from claiming. Empty only when severity is ok. */
+  bounds_claim: string;
+}
+
+export interface IndexReport {
+  index: {
+    index_id: string;
+    commit_sha: string;
+    source_sha256: string;
+    graph_hash: string;
+    /** Only providers that actually contributed. Never a capability claim. */
+    graph_source: string;
+    status: string;
+    providers: string[];
+    versions: Record<string, any>;
+    options: Record<string, any>;
+    languages: Record<string, number>;
+    files: {
+      discovered: number;
+      indexed: number;
+      skipped: number;
+      skipped_detail: Array<{ path: string; reason: string }>;
+    };
+    symbols: { total: number; functions: number; classes: number };
+    relationships: {
+      total: number;
+      calls: number;
+      imports: number;
+      resolved: number;
+      resolved_ratio: number;
+    };
+    discovered: { entrypoints: number; tests: number; configs: number; dependencies: number };
+    incremental: { enabled: boolean; changed_files: string[]; affected_symbols: string[] };
+    warnings: string[];
+    errors: string[];
+    duration_ms: number;
+  };
+  health: {
+    grade: string;
+    usable: boolean;
+    summary?: string;
+    checks: IndexHealthCheck[];
+  } & Record<string, any>;
+  /** What this index is not good enough to support. Travels into every certificate. */
+  claim_bounds: string[];
+}
+
+export interface GraphNode {
+  uid: string;
+  kind: string;
+  name: string;
+  qualname: string;
+  file: string;
+  start_line: number;
+  end_line: number;
+  language: string;
+  exported: boolean;
+  signature: string;
+  parameters: string[];
+  decorators: string[];
+  docline: string;
+  provenance: string[];
+}
+
+export interface GraphEdge {
+  src: string;
+  dst: string;
+  kind: string;
+  provenance: string[];
+  confidence: number;
+  /** True when a symbol-resolving provider produced it, not just a name match. */
+  resolved: boolean;
+  attrs?: Record<string, any>;
+}
+
+export interface GraphOverview {
+  stats: Record<string, any>;
+  providers: string[];
+  truncated: boolean;
+  warnings: string[];
+  entrypoints: GraphNode[];
+  sample_nodes: GraphNode[];
+  note: string;
+}
+
+export interface GraphSubgraph {
+  root: string;
+  depth: number;
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  truncated: boolean;
+  stats: Record<string, any>;
+}
+
+export interface SecurityNode {
+  ref: string;
+  category: string;
+  kind: string;
+  file: string;
+  line: number;
+  location: string;
+  owner: string;
+  rule_id: string;
+  cwe: string;
+  severity: string;
+  snippet: string;
+  why: string;
+  confidence: number;
+}
+
+export interface SecurityFlowStep {
+  kind: string;
+  location: string;
+  detail: string;
+  symbol: string;
+}
+
+export interface SecurityFlow {
+  ref: string;
+  source_ref: string;
+  sink_ref: string;
+  source_kind: string;
+  sink_kind: string;
+  cwe: string;
+  severity: string;
+  steps: SecurityFlowStep[];
+  call_path: string[];
+  sanitizers: string[];
+  validators: string[];
+  sanitized: boolean;
+  boundaries: string[];
+  crosses_trust_boundary: boolean;
+  /** taint | call-graph | proximity. */
+  basis: string;
+  /** resolved | union. */
+  precision: string;
+  entrypoint: string;
+  reachable_from_entrypoint: boolean;
+  /** False when there was no entrypoint to search from — unknown, not unreachable. */
+  reachability_measured: boolean;
+  interpolated: boolean;
+  confidence: number;
+  covering_tests: string[];
+  notes: string[];
+}
+
+export interface SecurityModelView {
+  content_hash: string;
+  index_id: string;
+  stats: Record<string, number>;
+  taxonomy: Record<string, any>;
+  nodes: SecurityNode[];
+  flows: SecurityFlow[];
+  trust_boundaries: Array<{ kind: string; description: string; members: string[] }>;
+  parse_errors: Array<{ path: string; error: string }>;
+  warnings: string[];
+}
+
+export interface SurfaceItem {
+  ref: string;
+  entrypoint: string;
+  entrypoint_kind: string;
+  route: string;
+  source_kind: string;
+  sink_kind: string;
+  sink_location: string;
+  cwe: string;
+  severity: string;
+  /** The six 0–1 factors whose product is the priority. Recorded so a rank is never a bare number. */
+  factors: Record<string, number>;
+  priority: number;
+  measured: boolean;
+  externally_controllable: boolean;
+  controls: string[];
+  sanitizers: string[];
+  covering_tests: string[];
+  testable: boolean;
+  testability_reason: string;
+  rationale: string[];
+}
+
+export interface ArchitectureView {
+  content_hash: string;
+  model: {
+    application_type: string;
+    type_evidence: string[];
+    languages: Record<string, number>;
+    non_code_files: Record<string, number>;
+    frameworks: string[];
+    entrypoints: Array<Record<string, any>>;
+    modules: Array<Record<string, any>>;
+    data_stores: string[];
+    authentication: string[];
+    trust_boundaries: string[];
+    gaps: string[];
+  } & Record<string, any>;
+  attack_surface: {
+    measured: boolean;
+    counts: Record<string, number>;
+    items: SurfaceItem[];
+    unauthenticated_entrypoints: string[];
+    unreached_sinks: string[];
+    untested_paths: string[];
+    notes: string[];
+  } & Record<string, any>;
+  gaps: string[];
+}
+
+export interface TestPlanRecord {
+  plan_id: string;
+  candidate_ref: string;
+  finding_handle: string;
+  status: string;
+  strategy: string;
+  oracle_kind: string;
+  engine: string;
+  engine_available: boolean;
+  engine_reason: string;
+  language: string;
+  /** Whether the spec came from a model or the deterministic fallback. */
+  proposed_by: string;
+  harness_path: string;
+  harness_sha256: string;
+  command: string[];
+  security_property: string;
+  spec: Record<string, any>;
+  provenance: Record<string, any>;
+  notes: string[];
+}
+
+export interface TestExecutionRecord {
+  plan_id: string;
+  candidate_ref: string;
+  finding_handle: string;
+  strategy: string;
+  engine: string;
+  harness_path: string;
+  harness_sha256: string;
+  command: string[];
+  commit_sha: string;
+  index_id: string;
+  input_hash: string;
+  environment: Record<string, any>;
+  reproduced: boolean;
+  reproduction_count: number;
+  reproductions_required: number;
+  verdict_detail: string;
+  proving_evidence: string;
+  attempts: Array<Record<string, any>>;
+  coverage: Record<string, any>;
+  campaign: Record<string, any>;
+  error: string;
+  duration_ms: number;
+}
+
+export interface TestsView {
+  plans: TestPlanRecord[];
+  executions: TestExecutionRecord[];
+  counts: Record<string, number>;
+}
+
+export interface ModelContextSummary {
+  context_hash: string;
+  candidate_ref: string;
+  task: string;
+  version: string;
+  provider: string;
+  model: string;
+  size_chars: number;
+  selected_files: string[];
+  selected_functions: string[];
+  code_slice_keys: string[];
+  budget: Record<string, number>;
+  used: Record<string, number>;
+  /** What did not fit, and why. Never silent. */
+  dropped: string[];
+  tool_call_count: number;
+  note: string;
+  tool_calls?: Array<Record<string, any>>;
+}
+
+export interface EngineInventory {
+  engines: Array<{
+    id: string;
+    label: string;
+    language: string;
+    strategies: string[];
+    status: "available" | "unavailable" | "unimplemented" | string;
+    coverage_feedback: boolean;
+    missing_binaries: string[];
+    missing_modules: string[];
+    reason: string;
+    notes: string;
+  }>;
+  by_language: Record<string, Array<Record<string, any>>>;
+  counts: { available: number; unavailable: number; unimplemented: number };
+  note: string;
+  probe_scope?: string;
+  caveat?: string;
+}
+
+// ---------------------------------------------------------------------------
 export const endpoints = {
   login: (email: string, password: string) =>
     request<TokenPair>("/api/auth/login", {
@@ -617,6 +937,25 @@ export const endpoints = {
       `/api/audit?limit=${limit}&offset=${offset}`,
     ),
   verifyAudit: () => api.get<Record<string, any>>("/api/audit/verify"),
+
+  // --- code intelligence ---------------------------------------------------
+  runIndex: (runId: string) => api.get<Projection<IndexReport>>(`/api/runs/${runId}/index`),
+  /** With no `uid`, statistics plus entrypoints. The whole graph is deliberately never returned. */
+  runGraph: (runId: string, uid = "", depth = 2, limit = 120) =>
+    api.get<Projection<GraphOverview> | Projection<GraphSubgraph>>(
+      `/api/runs/${runId}/graph?depth=${depth}&limit=${limit}` +
+        (uid ? `&uid=${encodeURIComponent(uid)}` : ""),
+    ),
+  runSecurity: (runId: string) =>
+    api.get<Projection<SecurityModelView>>(`/api/runs/${runId}/security`),
+  runArchitecture: (runId: string) =>
+    api.get<Projection<ArchitectureView>>(`/api/runs/${runId}/architecture`),
+  runTests: (runId: string) => api.get<TestsView>(`/api/runs/${runId}/tests`),
+  runContexts: (runId: string) => api.get<ModelContextSummary[]>(`/api/runs/${runId}/contexts`),
+  runContext: (runId: string, contextHash: string) =>
+    api.get<ModelContextSummary>(`/api/runs/${runId}/contexts/${contextHash}`),
+  engines: () => api.get<EngineInventory>("/api/system/engines"),
+  gitnexusInfo: () => api.get<Record<string, any>>("/api/system/gitnexus"),
 
   frameworks: () => api.get<{ frameworks: Framework[] }>("/api/system/frameworks"),
   sandboxInfo: () => api.get<Record<string, any>>("/api/system/sandbox"),

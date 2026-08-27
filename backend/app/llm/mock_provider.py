@@ -60,6 +60,11 @@ class MockLLMProvider(LLMProvider):
             LLMTask.PATCH_SYNTHESIS: self._patch,
             LLMTask.MUTATION_STRATEGIES: self._mutations,
             LLMTask.SIBLING_CANDIDATES: self._siblings,
+            LLMTask.TEST_SPEC: self._test_specs,
+            LLMTask.FUZZ_STRATEGY: self._fuzz_strategy,
+            LLMTask.ARCHITECTURE_ANNOTATE: self._architecture,
+            LLMTask.FLOW_TRIAGE: self._flow_triage,
+            LLMTask.SECURITY_HYPOTHESIS: self._security_hypothesis,
         }.get(request.task)
 
         if handler is None:
@@ -446,6 +451,245 @@ class MockLLMProvider(LLMProvider):
                 },
             )
         return {"strategies": strategies[:32]}
+
+    # ------------------------------------------------------------------
+    # Code-intelligence tasks
+    #
+    # These exist so the model-proposal path is exercised **offline and deterministically**: the
+    # demo must be able to show "security candidate -> TestSpec -> generated harness -> sandbox ->
+    # reproduction" with no API key and no network. Every value below is derived from the
+    # structured context the builder assembled, and every one still passes through the same strict
+    # schema validation, the same harness generator and the same oracle as a hosted model's output.
+    #
+    # Note what these read: the labelled ``metadata`` envelope, never the untrusted repository
+    # text. That is also a worked demonstration of the intended shape for a real proposer.
+    # ------------------------------------------------------------------
+    def _test_specs(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Propose a TestSpec from the flow in the assembled context."""
+        metadata = dict(payload.get("metadata") or {})
+        flow = dict(metadata.get("flow") or {})
+        sink_kind = str(flow.get("sink_kind", ""))
+        source_kind = str(flow.get("source_kind", ""))
+        cwe = str(flow.get("cwe", ""))
+        path = list(flow.get("path") or [])
+
+        # The sink class decides the oracle, the request shape and which mutations are worth
+        # trying. Same reasoning the deterministic fallback uses: the mock is not smarter than the
+        # system, it stands in for the part that needs judgement.
+        oracle, marker, field_name, template, mutations = {
+            "shell_exec": (
+                "marker_in_stdout",
+                "pov_marker",
+                "name",
+                {"op": "export", "format": "txt"},
+                ["separator_injection", "encoding_variants"],
+            ),
+            "process_exec": (
+                "marker_in_stdout",
+                "pov_marker",
+                "name",
+                {"op": "export", "format": "txt"},
+                ["separator_injection", "encoding_variants"],
+            ),
+            "path_construction": (
+                "canary_content_in_stdout",
+                "canary",
+                "path",
+                {"op": "asset"},
+                ["traversal_sequences", "encoding_variants"],
+            ),
+            "filesystem": (
+                "canary_content_in_stdout",
+                "canary",
+                "path",
+                {"op": "asset"},
+                ["traversal_sequences", "encoding_variants"],
+            ),
+            "indexed_write": (
+                "exception_raised",
+                "none",
+                "headers",
+                {"op": "parse"},
+                ["length_escalation", "boundary_values"],
+            ),
+        }.get(
+            sink_kind,
+            ("exception_raised", "none", "value", {}, ["boundary_values", "encoding_variants"]),
+        )
+
+        # The sink is the last location on the path; its file is the target.
+        target = ""
+        for step in reversed(path):
+            for token in str(step).split():
+                if ":" in token and "/" in token:
+                    target = token.split(":")[0]
+                    break
+            if target:
+                break
+
+        base = {
+            "path_construction": "report.tmpl",
+            "filesystem": "report.tmpl",
+            "indexed_write": "h0:0",
+        }.get(sink_kind, "kavachx-probe")
+
+        return {
+            "specs": [
+                {
+                    "target": target or "src",
+                    "entrypoint": str(flow.get("entrypoint", "") or "").split(":")[-1],
+                    "input_source": "cli_argument",
+                    "strategy": "mutation",
+                    "oracle": {
+                        "kind": oracle,
+                        "marker_role": marker,
+                        "description": (
+                            "A " + (sink_kind or "dangerous") + " sink has an observable "
+                            "consequence; assert on that rather than on the input shape."
+                        ),
+                    },
+                    "expected_security_property": (
+                        (source_kind or "external input")
+                        + " must not reach the "
+                        + (sink_kind or "dangerous operation")
+                        + " in a form that changes its behaviour"
+                    ),
+                    "payloads": [base],
+                    "request_template": template,
+                    "payload_field": field_name,
+                    "cwe": cwe,
+                    "rationale": (
+                        "Derived from the flow's sink class, its stated basis ("
+                        + str(flow.get("basis", "?"))
+                        + ") and the "
+                        + str(len(metadata.get("sanitizers") or []))
+                        + " sanitizer(s) on the path."
+                    ),
+                    "reproductions_required": 2,
+                    "timeout_ms": 30000,
+                    "fuzz": {
+                        "seeds": [base],
+                        "mutations": mutations,
+                        "max_iterations": 200,
+                        "stop_on_first_signal": True,
+                        "target_branches": [],
+                    },
+                }
+            ],
+            "strategy_note": (
+                "One mutation spec: this sink class has a deterministic observable, so mutating a "
+                "benign base value is the shortest route to a reproduction."
+            ),
+        }
+
+    # ------------------------------------------------------------------
+    def _fuzz_strategy(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Propose inputs aimed at the uncovered branches in the coverage feedback.
+
+        Reads each branch's *condition* and reuses the values derived from the literals in it.
+        Whether those inputs reach the branch is decided by re-measuring coverage, not here.
+        """
+        branches = list(payload.get("uncovered_branches") or [])
+        candidates: list[str] = []
+        targets: list[str] = []
+        for branch in branches[:12]:
+            location = str(branch.get("location", ""))
+            if location:
+                targets.append(location)
+            for value in list(branch.get("suggested_values") or [])[:4]:
+                text = str(value)
+                if text not in candidates:
+                    candidates.append(text)
+        if not candidates:
+            candidates = ["", "0", "-1", "9" * 64]
+        return {
+            "mutations": ["boundary_values", "length_escalation", "encoding_variants"],
+            "candidate_inputs": candidates[:32],
+            "target_branches": targets[:20],
+            "rationale": (
+                "Values taken from the literals the uncovered conditions compare against, plus "
+                "their neighbours: an off-by-one boundary is the most common reason a branch "
+                "stays unreached."
+            ),
+        }
+
+    # ------------------------------------------------------------------
+    def _architecture(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Annotate the derived architecture model. Cannot change any derived fact."""
+        metadata = dict(payload.get("metadata") or {})
+        architecture = dict(metadata.get("architecture") or {})
+        return {
+            "narrative": (
+                "A "
+                + str(architecture.get("application_type", "unknown"))
+                + " target with "
+                + str(architecture.get("entrypoint_count", 0))
+                + " entrypoint(s). Annotation only: every count and boundary was derived from "
+                "the code graph, not from this text."
+            ),
+            "module_purposes": [],
+        }
+
+    # ------------------------------------------------------------------
+    def _flow_triage(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Triage derived flows. Severity comes from the sink class, never invented."""
+        metadata = dict(payload.get("metadata") or {})
+        flows = list(metadata.get("related_flows") or [])
+        out: list[dict[str, Any]] = []
+        for flow in flows[:40]:
+            sink = str(flow.get("sink_kind", ""))
+            severity = {
+                "shell_exec": "CRITICAL",
+                "process_exec": "HIGH",
+                "dynamic_eval": "CRITICAL",
+                "deserialisation": "CRITICAL",
+                "sql": "CRITICAL",
+                "template_render": "CRITICAL",
+                "path_construction": "HIGH",
+                "filesystem": "MEDIUM",
+            }.get(sink, "MEDIUM")
+            out.append(
+                {
+                    "rule_id": str(flow.get("ref", ""))[:120],
+                    "location": str(flow.get("ref", ""))[:300],
+                    "description": (str(flow.get("source_kind", "")) + " reaches " + sink)[:600],
+                    "severity": severity,
+                    "candidate_clause_kind": "",
+                    "confidence": float(flow.get("confidence", 0.5) or 0.5),
+                    "cwe": str(flow.get("cwe", "")),
+                }
+            )
+        return {"candidates": out}
+
+    # ------------------------------------------------------------------
+    def _security_hypothesis(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """A root-cause-shaped hypothesis over the flow, for the reasoning stage."""
+        metadata = dict(payload.get("metadata") or {})
+        flow = dict(metadata.get("flow") or {})
+        path = list(flow.get("path") or [])
+        location = ""
+        for step in reversed(path):
+            for token in str(step).split():
+                if ":" in token and "/" in token:
+                    location = token
+                    break
+            if location:
+                break
+        return {
+            "location": location or "src",
+            "function": "",
+            "summary": (
+                str(flow.get("source_kind", "external input"))
+                + " reaches "
+                + str(flow.get("sink_kind", "a dangerous operation"))
+                + " with "
+                + str(len(flow.get("sanitizers_on_path") or []))
+                + " sanitizer(s) on the path."
+            ),
+            "causal_chain": [str(step) for step in path[:12]],
+            "minimal_patch_location": location or "",
+            "confidence": float(flow.get("confidence", 0.5) or 0.5),
+        }
 
     # ------------------------------------------------------------------
     def _siblings(self, payload: dict[str, Any]) -> dict[str, Any]:

@@ -29,7 +29,8 @@ T = TypeVar("T", bound=BaseModel)
 
 
 class LLMTask:
-    """Named tasks. The mock provider dispatches on these."""
+    """Named tasks. The mock provider dispatches on these, and app.llm.routing maps them to a
+    model role so a deployment with a small and a strong model gets the right one per task."""
 
     PROBE_INTERFACES = "probe.interfaces"
     SAMHITA_PROPOSE = "samhita.propose_clauses"
@@ -38,6 +39,16 @@ class LLMTask:
     PATCH_SYNTHESIS = "repair.patch_synthesis"
     MUTATION_STRATEGIES = "gauntlet.mutation_strategies"
     SIBLING_CANDIDATES = "gauntlet.sibling_candidates"
+    #: Structured annotation of the derived architecture model. Cannot change a derived fact.
+    ARCHITECTURE_ANNOTATE = "understand.architecture_annotate"
+    #: Triage of security flows the deterministic builder produced.
+    FLOW_TRIAGE = "discovery.flow_triage"
+    #: A security hypothesis over one candidate's bounded context.
+    SECURITY_HYPOTHESIS = "discovery.security_hypothesis"
+    #: A TestSpec: a structured testing *intention*, never executable code.
+    TEST_SPEC = "testing.test_spec"
+    #: Coverage-guided fuzzing strategy, proposed from coverage feedback.
+    FUZZ_STRATEGY = "testing.fuzz_strategy"
 
 
 @dataclass(slots=True)

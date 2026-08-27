@@ -61,6 +61,7 @@ from app.patching.policy import evaluate as evaluate_policy
 from app.pramaan import assurance as assurance_mod
 from app.pramaan import certificate as certificate_mod
 from app.pramaan import docs as docs_mod
+from app.pramaan import intel_evidence
 from app.samhita.engine import SamhitaEngine
 from app.samhita.observation import load_benign_corpus
 from app.sandbox import create_sandbox, materialise
@@ -465,28 +466,27 @@ async def _verify_cli_candidates(
 async def node_index_repo(ctx: RunContext, state: KavachState) -> KavachState:
     assert ctx.pinned is not None
 
-    # -- index -------------------------------------------------------------
-    phase = Phase.INDEX.value
-    await _set_phase(ctx, phase)
-    await ctx.emitter.phase_start(phase, "indexing with tree-sitter")
-
+    # -- world model -------------------------------------------------------
+    # The INDEX phase is owned by app.orchestration.intel_nodes.node_index, which has already
+    # built the merged code knowledge graph. The World Model is still built here because it is the
+    # structure the static channel, root-cause verification, blast radius and the sibling hunt all
+    # query, and replacing those call sites wholesale would be a rewrite rather than an upgrade.
+    #
+    # What *is* corrected: its `graph_source` now comes from the index job — which records what
+    # actually contributed — instead of from a bare "is there a gitnexus binary on PATH" check
+    # that labelled runs `gitnexus+tree-sitter` without ever invoking GitNexus.
     model = await asyncio.to_thread(build_world_model, ctx.pinned.work)
     ctx.world_model = model
+    if ctx.index_job is not None:
+        model.graph_source = ctx.index_job.graph_source
+        model.index_summary = {
+            **model.index_summary,
+            "index_id": ctx.index_job.index_id,
+            "index_status": ctx.index_job.status,
+            "providers": ctx.index_job.providers,
+            "resolved_relationship_ratio": ctx.index_job.resolved_ratio,
+        }
     summary = model.summary()
-
-    await ctx.emitter.tool(
-        name="tree-sitter",
-        target=f"{summary['files']} files",
-        ms=0,
-        ok=True,
-        detail=(
-            f"{summary['functions']} functions, {summary['classes']} classes, "
-            f"{summary['call_edges']} call edges "
-            f"({model.index_summary.get('by_indexer', {})})"
-        ),
-    )
-    await ctx.emitter.phase_done(phase, f"{summary['files']} files indexed")
-    await _mark_phase(ctx, phase, "completed")
 
     # -- probe -------------------------------------------------------------
     phase = Phase.PROBE.value
@@ -2345,6 +2345,26 @@ async def node_attest(ctx: RunContext, state: KavachState) -> KavachState:
             ),
         )
 
+        # -- code-intelligence evidence --------------------------------------
+        # Added to the same graph, so the dangling-claim refusal covers it: a certificate that
+        # cites an index, a flow or a harness must have a node for each.
+        intel = intel_evidence.attach(
+            graph,
+            finding_handle=handle,
+            index=state.get("index") or None,
+            index_health=state.get("index_health") or None,
+            graph_summary=state.get("graph") or None,
+            architecture=state.get("architecture") or None,
+            attack_surface=state.get("attack_surface") or None,
+            security_flow=_flow_for_finding(ctx, work),
+            test_plans=_plans_for_finding(ctx, work),
+            test_executions=_executions_for_finding(ctx, work),
+            coverage=(ctx.coverage.as_dict() if ctx.coverage is not None else None),
+            model_context=_context_for_finding(ctx, work),
+            regression=state.get("regression") or None,
+        )
+        intel["explains"] = intel_evidence.explains(intel, finding_payload)
+
         certificate = certificate_mod.build_certificate(
             run=run_info,
             repository=repository_info,
@@ -2359,6 +2379,7 @@ async def node_attest(ctx: RunContext, state: KavachState) -> KavachState:
             samhita_stats=samhita.stats,
             sandbox_stats=sandbox_stats,
             provider_info=ctx.provider_info(),
+            intel=intel,
         )
 
         if not certificate.ok:
@@ -2642,6 +2663,85 @@ async def _finding_payload(work: FindingWork) -> dict[str, Any]:
             "coverage_percent": finding.coverage_percent,
         }
 
+
+
+# ---------------------------------------------------------------------------
+# Mapping a finding back onto the code-intelligence evidence it came from.
+#
+# The link is by *location*: a finding's crash site or root cause is a `file:line`, and a security
+# flow's sink is the same shape. Matching on location rather than carrying an id through every
+# intermediate structure keeps the existing validator and queue untouched — they never had to know
+# about flows — while still producing an auditable join.
+# ---------------------------------------------------------------------------
+def _finding_locations(work: FindingWork) -> set[str]:
+    locations: set[str] = set()
+    outcome = work.outcome
+    if outcome is not None:
+        site = str(getattr(outcome, "crash_site", "") or "")
+        if site:
+            locations.add(site)
+    if work.root_cause is not None and work.root_cause.location:
+        locations.add(work.root_cause.location)
+    plan = work.plan or {}
+    if plan.get("target_file"):
+        locations.add(f"{plan['target_file']}:{plan.get('target_line', 0)}")
+    return {loc for loc in locations if loc}
+
+
+def _flow_for_finding(ctx: RunContext, work: FindingWork) -> dict[str, Any] | None:
+    """The security flow whose sink matches this finding's location, if any."""
+    if ctx.security_graph is None:
+        return None
+    locations = _finding_locations(work)
+    files = {loc.split(":")[0] for loc in locations}
+    best = None
+    for flow in ctx.security_graph.flows:
+        sink = ctx.security_graph.nodes.get(flow.sink_ref)
+        if sink is None:
+            continue
+        if sink.location in locations:
+            # Exact file:line match wins immediately.
+            best = flow
+            break
+        if sink.file in files and best is None:
+            # Same file is a weaker but useful match; keep looking for an exact one.
+            best = flow
+    if best is None:
+        return None
+    payload = best.as_dict()
+    payload["steps"] = best.explain()
+    return payload
+
+
+def _plans_for_finding(ctx: RunContext, work: FindingWork) -> list[dict[str, Any]]:
+    """Test plans generated for the flow this finding corresponds to."""
+    flow = _flow_for_finding(ctx, work)
+    if flow is None:
+        return []
+    result = ctx.synthesis.get(str(flow.get("ref", "")))
+    if result is None:
+        return []
+    return [plan.as_dict() for plan in result.plans]
+
+
+def _executions_for_finding(ctx: RunContext, work: FindingWork) -> list[dict[str, Any]]:
+    """Execution records for this finding's plans."""
+    plan_ids = {p.get("plan_id") for p in _plans_for_finding(ctx, work)}
+    if not plan_ids:
+        return []
+    return [
+        record.as_dict()
+        for record in ctx.test_executions
+        if record.plan_id in plan_ids
+    ]
+
+
+def _context_for_finding(ctx: RunContext, work: FindingWork) -> dict[str, Any] | None:
+    """The model context assembled for this finding's candidate, if a model was consulted."""
+    flow = _flow_for_finding(ctx, work)
+    if flow is None:
+        return None
+    return ctx.model_contexts.get(str(flow.get("ref", "")))
 
 # ---------------------------------------------------------------------------
 # 12. publish gate

@@ -36,9 +36,26 @@ p.write_text(s)"
 	@echo "  created .env with generated secrets"
 
 .PHONY: deps
-deps: ## Install backend and frontend dependencies
+deps: gitnexus ## Install backend, frontend and code-graph dependencies
 	cd $(BACKEND) && $(UV) sync
 	cd $(FRONTEND) && npm install --no-audit --no-fund
+
+.PHONY: gitnexus
+gitnexus: ## Install GitNexus repo-locally (the code knowledge graph provider)
+	@echo ""
+	@echo "  Installing GitNexus into ./node_modules — the code knowledge graph provider."
+	@echo "  It is OPTIONAL: without it KavachX indexes with tree-sitter only, every"
+	@echo "  relationship is a name match rather than a resolved reference, and the index"
+	@echo "  health report records that bound. See docs/CODE_GRAPH.md."
+	@echo "  Licence: PolyForm Noncommercial 1.0.0 (GitNexus only, not KavachX)."
+	@echo ""
+	GITNEXUS_SKIP_OPTIONAL_GRAMMARS=1 npm install --no-audit --no-fund
+	@node_modules/.bin/gitnexus --version 2>/dev/null \
+		|| echo "  GitNexus did not report a version; KavachX will index tree-sitter-only."
+
+.PHONY: gitnexus-doctor
+gitnexus-doctor: ## Report GitNexus availability and platform capabilities
+	cd $(BACKEND) && $(UV) run python -m scripts.gitnexus_doctor
 
 .PHONY: db
 db: ## Start PostgreSQL

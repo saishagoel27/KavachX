@@ -43,8 +43,15 @@
 > evidence-backed assurance certificate.
 
 ```
-Understand → Discover → Validate → Shield → Repair → Attack Repair → Verify → Attest → Publish
+Index → Understand → Discover → Test → Validate → Shield → Repair
+      → Attack Repair → Verify → Attest → Publish
 ```
+
+> It reconstructs the codebase as a **code knowledge graph** (GitNexus + tree-sitter, merged with
+> per-edge provenance), layers a **security graph** of sources, sinks, sanitizers and data flows over
+> it, reasons over the **attack surface**, generates **targeted security tests**, executes them in an
+> isolated sandbox, deterministically validates findings, repairs root causes, attacks its own
+> repairs, and produces evidence-backed assurance.
 
 ---
 
@@ -107,15 +114,22 @@ service. Running it through KavachX produces a **real** end-to-end trace:
 | Step | What actually happens |
 | --- | --- |
 | Ingest | Repository is pinned to an immutable content SHA and copied into a sandbox workspace. |
-| Probe / Index | tree-sitter (with a regex fallback) builds the World Model: files, functions, callers, entrypoints, sinks. |
+| Index | GitNexus (resolved) and tree-sitter (name-matched) are merged into one code knowledge graph with **per-edge provenance**. The index gets a reproducible identity: `sha256(source sha + indexer/parser versions + options)`. Verified: identical `index_id` *and* `graph_hash` across separate workspaces. |
+| Index validation | Ten deterministic checks produce a health grade and **claim bounds** — what this index is not good enough to support. `INDEX_HEALTH.md`. |
+| Security model | Sources, sinks, sanitizers, validators, auth controls and trust boundaries, plus data flows carrying a stated `basis` (taint / call-graph / proximity) and `precision` (resolved / union). |
+| Understand | A structured application model and a ranked attack surface, each item showing the arithmetic behind its priority. `ARCHITECTURE.md`. Its `NOT KNOWN` section is part of the deliverable. |
+| Probe / World model | Interfaces proposed, then **confirmed against the filesystem** before use. |
 | SAMHITA | Benign workload is executed, value profiles observed, clauses proposed under strict JSON schema, compiled to Python predicates, then **falsified against held-out traces**. Hallucinated clauses die here. |
 | Discovery | Four channels (graph/static, config/reachability, fuzzing, runtime) push hypotheses into one persistent priority queue. |
+| Test synthesis | A candidate becomes a schema-validated `TestSpec`, and KavachX generates the harness from its own template — no model-supplied string ever becomes code. Engine availability is probed **inside the sandbox**; an absent engine means the strategy is reported **NOT RUN**, never clean. |
+| Execute | The generated harness runs in the sandbox and is judged by a deterministic oracle. Verified: `reproduced=True 2/2` in independent processes, proved by a marker nothing in the target's own output can produce. |
 | Validation | Each hypothesis becomes an executable job **inside the sandbox**. A finding is only `VALIDATED` when a deterministic signal (exit code, sanitizer output, contract violation, marker artifact) reproduces. |
+| Regression | The finding's **actual reproducing input** becomes a durable test the gauntlet re-runs against every patch, plus a publishable test file in the repository's own framework. Verified to fire on the unpatched build first. |
 | Shield | A reversible input-filter shield is synthesised and verified to block the exploit while the benign corpus still passes. `TIME TO PROTECTION` starts here. |
 | Repair | Root cause is located and verified to be on the executed path, then a patch is synthesised and applied to a **copy** in the sandbox. |
 | Refutation Gauntlet | Exploit mutation, sibling hunt, differential replay and SAMHITA re-check all execute for real. **Patch v1 is genuinely refuted** — the mutation engine finds a live bypass of the naive filter. |
 | Iteration | The refutation becomes a hard constraint. Patch v2 is synthesised and survives all four stages. |
-| PRAMAAN | An evidence graph is built, hashed and signed; assurance is graded A/B/C/R by deterministic rules. |
+| PRAMAAN | An evidence graph is built, hashed and signed; assurance is graded A/B/C/R by deterministic rules. The certificate now also carries the index identity, graph provenance, resolved-relationship ratio, flow basis and precision, harness hash, execution environment, coverage bound, and direct answers to the nine "how do you know?" questions. |
 | Publish | `CHANGES.md`, `REMAINING.md` and `certificate.json` go to an isolated Publisher that owns the only GitHub credential in the system. |
 
 Nothing in that table is simulated with `sleep()`. Every UI event is emitted by a real
@@ -157,6 +171,7 @@ hardcoded secret and CWE-295 `jwt.decode(verify=False)`.
 
 ```
 kavachx/
+├── package.json              GitNexus, repo-local (optional; PolyForm Noncommercial)
 ├── frontend/                 Next.js 16 · TypeScript · Tailwind · Monaco · Recharts
 ├── backend/                  FastAPI · SQLAlchemy 2 · Alembic · LangGraph
 │   └── app/

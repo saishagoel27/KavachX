@@ -1,0 +1,18 @@
+{
+  "name": "kavachx-tooling",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Repo-local Node tooling for KavachX. Currently just GitNexus, the code knowledge graph provider used by backend/app/indexing.",
+  "license": "SEE LICENSE IN docs/CODE_GRAPH.md",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "gitnexus": "gitnexus",
+    "gitnexus:doctor": "gitnexus doctor",
+    "gitnexus:version": "gitnexus --version"
+  },
+  "dependencies": {
+    "gitnexus": "1.6.9"
+  }
+}

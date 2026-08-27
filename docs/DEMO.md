@@ -65,10 +65,128 @@ the run log:
 WARNING: DEVELOPMENT ADAPTER. A host subprocess is not an isolation boundary.
 ```
 
-### Index → Probe → World model
+### Index — the code knowledge graph
 
-tree-sitter parses the tree into files, functions, classes, imports and call sites. On the demo:
-24 files, 26 functions, 4 classes, 28 call edges, 4 entrypoints, 8 candidate sinks.
+Two providers, merged, every edge tagged with the provider that produced it.
+
+```
+tree-sitter   24 files → 84 nodes, 106 edges   (name-matched, complete, imprecise)
+GitNexus      26 files → 87 nodes,  99 edges   (resolved, precise, incomplete)
+                                    ↓ merge
+              118 nodes, 168 edges · 57 corroborated · 59% resolved
+              graph_source: gitnexus+tree-sitter
+              index_id: 04adf9a6a08a674b… (reproducible)
+```
+
+`graph_source` names only providers that **actually contributed**. Both are needed, and the demo
+target shows exactly why: GitNexus never resolved the cross-file call
+`service.handle → parser.parse_header`, and tree-sitter does — by over-approximation. So:
+
+```
+parse_header  [resolved] reachable=False        ← GitNexus resolved no such call
+parse_header  [union   ] reachable=True conf=0.55 via=tree-sitter
+```
+
+Reachability is answered at a **stated precision**, and every claim built on it inherits that.
+
+Without GitNexus installed (`GITNEXUS_ENABLED=false`) the run still works: `graph_source:
+tree-sitter`, 0% resolved, and the health report adds the bound. Nothing is faked and nothing is
+skipped.
+
+### Index validation — INDEX HEALTH
+
+Ten deterministic checks, then a grade, then the part that matters — **what this index cannot
+support**:
+
+```
+INDEX HEALTH
+
+Repository: examples/vulnerable-demo
+Index:  04adf9a6a08a674b  (gitnexus+tree-sitter)
+Grade:  B
+
+Files:          discovered 24 · indexed 24 · skipped 0
+Symbols:        functions 26 · classes 4
+Relationships:  calls 29 · imports 28 · resolved 99 of 168 (59%)
+Entrypoints: 4   Tests: 1   Configs: 3   Dependencies: 0
+
+Warnings:
+  [WARN] Most relationships are name matches, not resolved references
+
+This index cannot support:
+  - a precise reachability claim — paths at 'union' precision may include calls that
+    cannot actually occur
+```
+
+Stored as `INDEX_HEALTH.md`. That last block travels into every certificate this run issues.
+
+### Security model — sources, sinks, and real data flows
+
+```
+sources 17 · sinks 6 · sanitizers 3 · validators 2 · controls 0
+flows 9 (1 taint-proven, 8 call-graph) · reachable 9 · trust boundaries 3
+```
+
+The top flow is the seeded vulnerability, with its full path:
+
+```
+cli_arg → shell_exec   CWE-78  CRITICAL   basis=call-graph precision=union conf=0.403
+
+  CALL      src/main.py:37                entrypoint src/main.py:main
+  SOURCE    src/main.py:38                Command-line arguments are supplied by whoever
+                                          invokes the program.
+  CALL      src/reportsvc/service.py:86   call into entrypoint
+  CALL      src/reportsvc/service.py:29   call into handle
+  CALL      src/reportsvc/exporter.py:30  call into export_report
+  SINK      src/reportsvc/exporter.py:42  A shell interprets metacharacters, so any
+                                          injected token becomes a command.
+
+note: Whether the specific value reaching the sink derives from this source was not proven
+      by taint analysis across the call boundary.
+```
+
+**This answers the demo's three questions from indexed evidence** rather than from prose: the path is
+reachable because a call chain from a `__main__`-guarded entrypoint exists (at union precision, as
+stated); the input is untrusted because `cli_arg` crosses the `cli_to_application` boundary; the sink
+is security-sensitive because `shell=True` hands a constructed string to a shell.
+
+And it tells you what it has **not** shown.
+
+### Understand — application model and attack surface
+
+```
+APPLICATION            cli_tool
+  languages            python (9)
+ENTRYPOINTS            4, all unauthenticated
+  main(argv)   [cli]       src/main.py:37
+  main(argv)   [cli]       src/reportsvc/archiver.py:14
+  entrypoint() [library]   src/reportsvc/service.py:86
+  handle()     [library]   src/reportsvc/service.py:29
+TRUST BOUNDARIES       cli_to_application · application_to_filesystem · application_to_shell
+SOURCES                cli_arg×7 · deserialized_input×5 · env_var×3 · file_read×1 · stdin×1
+SINKS                  filesystem×3 · process_exec×2 · shell_exec×1
+SECURITY CONTROLS      none identified
+TESTS                  1 file, 11 cases, pytest
+
+NOT KNOWN
+  - No authentication or authorisation control was identified anywhere in the tree. That may
+    be correct (a library, an internal CLI) or may mean the controls are expressed in a form
+    the taxonomy does not recognise — it is not evidence that the application is unprotected.
+  - No dependency manifest was found, so the framework picture is derived from imports alone.
+```
+
+The attack surface then ranks every flow, with the arithmetic shown:
+
+```
+ 1. [CRITICAL] cli_arg → shell_exec @ src/reportsvc/exporter.py:42
+    entry src/main.py:main  (no control on the path)  priority 0.2398
+    priority = severity(1.00) × controllability(0.70) × reachability(1.00)
+             × dataflow(0.40) × controls(1.00) × coverage(0.85)
+```
+
+Stored as `ARCHITECTURE.md`. **`NOT KNOWN` is part of the deliverable**, not an appendix.
+
+### Probe → World model
 
 The probe proposes interfaces; every field is then **confirmed against the filesystem** before use.
 The console shows the confirmation notes:
@@ -141,6 +259,78 @@ config/reachability: debug mode is enabled
 
 That is the honest answer. It is not counted as a finding, and it is not silently dropped.
 
+### Test synthesis — candidate to executable harness
+
+The engine inventory is probed **inside the sandbox**, because that is the interpreter a harness
+runs in:
+
+```
+test engines: 3 available, 7 unavailable, 3 unimplemented
+engine NOT RUN: Hypothesis (property-based) cannot run here — missing module(s): hypothesis
+engine NOT RUN: Atheris (libFuzzer for Python) cannot run here — missing module(s): atheris
+engine NOT RUN: libFuzzer (clang) cannot run here — missing executable(s): clang
+```
+
+Seven unavailable engines mean seven strategies reported **NOT RUN** — never "clean".
+
+Then, for the top candidate:
+
+```
+[GENERATED] mutation  engine=kx-mutational  oracle=marker_in_stdout
+            harness=_kavachx/tests/kx_mutation_c8d66d325df2.py
+            mutation families: separator_injection, encoding_variants
+```
+
+The harness is a real file, saved verbatim as a run artifact, carrying its own provenance:
+
+```python
+# GENERATED BY KAVACHX — DO NOT EDIT
+#
+# This harness was generated from a validated TestSpec by app/testing/harness.py.
+# Every value below was inserted as a data literal; no model-supplied text is executable here.
+#
+#   plan_id : c8d66d325df2765f
+#   target  : src/reportsvc/exporter.py:export_report
+#   strategy: mutation
+#   oracle  : marker_in_stdout
+#   property: cli_arg must not reach the shell_exec operation at
+#             src/reportsvc/exporter.py:42 in a form that changes its behaviour
+```
+
+With `LLM_PROVIDER=mock` the spec still comes through the model path — the mock has deterministic
+scripts for all twelve tasks — so this step is demonstrated **offline, with no API key**. The
+`proposed_by` field records whether a spec came from a model or the deterministic fallback.
+
+### Execute — the harness reproduces the vulnerability
+
+```
+mutation  reproduced=True  count=2/2  attempts=2
+  verdict: The oracle fired in 2 of 2 independent executions (required 2).
+  PROOF  : marker_in_stdout: marker present in stdout — The marker appearing in stdout
+           proves the injected command executed: nothing in the target's own output can
+           produce it.
+  attempt 0: exit=1 signals=[] oracle=FIRED
+  attempt 1: exit=1 signals=[] oracle=FIRED
+  coverage : measured=True pct=20.0
+  env      : dev  network_enforced=False
+```
+
+The winning payload, recovered from the harness's own report:
+
+```
+kavachx-probe&echo KAVACHX_POV_MARKER_7F3A
+```
+
+Two independent processes, one deterministic oracle, and a marker nothing in the target's own output
+can produce. The `env` line is there because a reproduction under the dev adapter and one under
+gVisor are not equally strong evidence, and the certificate records which.
+
+A fuzz or mutation plan whose oracle does **not** fire escalates to a coverage-guided campaign:
+uncovered branches are parsed for the literals their conditions compare against, values are derived
+from them, and whether an input was good is decided by **whether coverage actually moved** — not by
+the model's confidence in it. `FuzzCampaign` records `model_candidates` alongside
+`model_candidates_useful`, which is the honest measured score for the model's contribution.
+
 ### Validation — the only place a finding is born
 
 Each hypothesis becomes an executable job. For command injection the validator tries each separator
@@ -206,6 +396,27 @@ BLAST RADIUS
 
 Only the root-cause file may be edited. Callers are in the *regression* scope — they must be
 re-verified — but that is not licence to edit them.
+
+### Regression — the reproduction, preserved
+
+Each validated finding's **actual reproducing input** becomes a durable test, and a publishable one:
+
+```
+regression plan built from the reproduction record of V01
+  harness: _kavachx/tests/kx_regression_ac0adbd38e68.py
+  regression on UNPATCHED build: reproduced=True (1/1)
+  PROOF: marker_in_stdout: marker present in stdout
+  publishable artifact: tests/test_kavachx_regression_v01.py  (pytest — the repository's
+                                                               own convention)
+```
+
+It is verified against the **unpatched** build first, so the test is known to be capable of firing. A
+regression test that has never been shown to fire is not a guard, it is a comment.
+
+The gauntlet then re-runs it against every patch iteration: a patch is not verified until the
+original exploit no longer fires. The publishable file is written under `_kavachx/`, **not** into the
+target's `tests/` — the target tree is what is under analysis, and the publisher places it at its
+intended path only when a pull request is actually opened.
 
 ### Patch v1 — and its refutation
 
@@ -313,6 +524,53 @@ in the same place as what was.
 ---
 
 ## What to look at afterwards
+
+### The new artifacts and endpoints
+
+```bash
+# the index: identity, provenance, counters, health grade, claim bounds
+curl -H "Authorization: Bearer $TOKEN" localhost:8000/api/runs/$RUN/index
+
+# a bounded subgraph around one symbol (never the whole graph)
+curl -H "Authorization: Bearer $TOKEN" \
+  "localhost:8000/api/runs/$RUN/graph?uid=src/reportsvc/exporter.py:export_report&depth=2"
+
+# sources, sinks, sanitizers, trust boundaries, flows with basis + precision
+curl -H "Authorization: Bearer $TOKEN" localhost:8000/api/runs/$RUN/security
+
+# the application model and the ranked attack surface with per-item factors
+curl -H "Authorization: Bearer $TOKEN" localhost:8000/api/runs/$RUN/architecture
+
+# every generated test plan and every execution record
+curl -H "Authorization: Bearer $TOKEN" localhost:8000/api/runs/$RUN/tests
+
+# exactly what context the model received, and what was dropped for budget
+curl -H "Authorization: Bearer $TOKEN" localhost:8000/api/runs/$RUN/contexts
+
+# engine availability, and GitNexus resolution + licence
+curl -H "Authorization: Bearer $TOKEN" localhost:8000/api/system/engines
+curl -H "Authorization: Bearer $TOKEN" localhost:8000/api/system/gitnexus
+```
+
+Artifacts: `INDEX_HEALTH.md`, `ARCHITECTURE.md`, every `generated_test`, every `regression_test`,
+`CHANGES.md`, `REMAINING.md`, and one `certificate-*.json` per finding.
+
+### Prove the index is reproducible
+
+Run the demo twice. `index_id` and `graph_hash` are identical, because the identity is
+`sha256(source sha + indexer/parser versions + options)` and the graph hash is structural.
+
+### Prove GitNexus is genuinely optional
+
+```bash
+GITNEXUS_ENABLED=false make demo
+```
+
+The run still finds, tests, validates, repairs and attests. `graph_source` becomes `tree-sitter`,
+`resolved_relationship_ratio` becomes `0.0`, and the health report adds a second claim bound. That
+degradation is the honest one — and it is also the configuration a commercial deployment must use,
+since GitNexus is PolyForm Noncommercial. See [CODE_GRAPH.md](CODE_GRAPH.md).
+
 
 | Where | What it shows |
 | --- | --- |

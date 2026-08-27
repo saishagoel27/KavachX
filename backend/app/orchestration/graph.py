@@ -22,7 +22,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from app.core.logging import get_logger
-from app.orchestration import nodes
+from app.orchestration import intel_nodes, nodes
 from app.orchestration.state import KavachState, RunContext
 
 logger = get_logger(__name__)
@@ -30,19 +30,34 @@ logger = get_logger(__name__)
 NodeFn = Callable[[RunContext, KavachState], Awaitable[KavachState]]
 
 #: Node order. Names match the spec's node list; several spec nodes are folded into one
-#: implementation where splitting them would only add a state round-trip:
-#:   index_repo  = probe + index + world_model
-#:   discovery_fanout = discovery + hypothesis_queue
-#:   validate    = validate + correlate
-#:   patch_synthesis = prioritize + patch + blast_radius + gauntlet iteration loop
+#: implementation where splitting them would only add a state round-trip.
+#:
+#: The code-intelligence stages come first and in this order for a reason: nothing downstream can
+#: be trusted further than the index that produced it, so the index is built, then *validated*,
+#: then the security semantics are layered on, then the application is understood — and only then
+#: does anything start looking for vulnerabilities.
 NODE_SEQUENCE: list[tuple[str, NodeFn]] = [
     ("ingest", nodes.node_ingest),
+    # --- code intelligence ---------------------------------------------
+    ("index", intel_nodes.node_index),
+    ("index_validate", intel_nodes.node_index_validate),
+    ("security_model", intel_nodes.node_security_model),
+    ("understand", intel_nodes.node_understand),
+    # --- target interface + executability ------------------------------
+    # Runs after understanding so the probe can use the graph's entrypoints, and so the
+    # static-only decision is made with the attack surface already known.
     ("index_repo", nodes.node_index_repo),
     ("contract_synthesis", nodes.node_contract_synthesis),
+    # --- discovery -----------------------------------------------------
     ("discovery_fanout", nodes.node_discovery_fanout),
+    # --- test synthesis + execution ------------------------------------
+    ("test_synthesis", intel_nodes.node_test_synthesis),
+    ("execute", intel_nodes.node_execute),
+    # --- deterministic validation and repair ---------------------------
     ("validate", nodes.node_validate),
     ("shield", nodes.node_shield),
     ("root_cause", nodes.node_root_cause),
+    ("regression", intel_nodes.node_regression),
     ("patch_synthesis", nodes.node_patch_and_gauntlet),
     ("attest", nodes.node_attest),
     ("publish_gate", nodes.node_publish_gate),

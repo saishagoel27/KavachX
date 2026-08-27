@@ -39,6 +39,24 @@ class KavachState(TypedDict, total=False):
     status: str
     target: dict[str, Any]
     world: dict[str, Any]
+    #: Index job record + reproducible index identity (app.indexing.job.IndexJob).
+    index: dict[str, Any]
+    #: Deterministic index health report and the claims it forbids.
+    index_health: dict[str, Any]
+    #: Code knowledge graph statistics and provenance.
+    graph: dict[str, Any]
+    #: Security graph statistics: sources, sinks, sanitizers, flows, trust boundaries.
+    security: dict[str, Any]
+    #: The structured application model produced by the UNDERSTAND stage.
+    architecture: dict[str, Any]
+    #: Ranked attack surface with per-item priority factors.
+    attack_surface: dict[str, Any]
+    #: Generated test plans, per candidate.
+    test_plans: list[dict[str, Any]]
+    #: Executed test records with oracle verdicts and coverage.
+    test_executions: list[dict[str, Any]]
+    #: Regression plans and publishable artifacts derived from validated findings.
+    regression: dict[str, Any]
     samhita: list[dict[str, Any]]
     benign_corpus_ref: str
     hypotheses: list[dict[str, Any]]
@@ -70,6 +88,15 @@ def initial_state(*, run_id: uuid.UUID, tenant_id: uuid.UUID) -> KavachState:
         status="RUNNING",
         target={},
         world={},
+        index={},
+        index_health={},
+        graph={},
+        security={},
+        architecture={},
+        attack_surface={},
+        test_plans=[],
+        test_executions=[],
+        regression={},
         samhita=[],
         benign_corpus_ref="",
         hypotheses=[],
@@ -129,6 +156,36 @@ class RunContext:
     sandbox: SandboxAdapter | None = None
     pinned: PinnedSource | None = None
     world_model: WorldModel | None = None
+    #: The merged code knowledge graph (GitNexus + tree-sitter). None until INDEX runs.
+    code_graph: Any = None
+    #: app.indexing.job.IndexJob for this run.
+    index_job: Any = None
+    #: app.indexing.health.IndexHealthReport.
+    index_health: Any = None
+    #: Per-file detail from the tree-sitter provider (sink hits, skip reasons, hashes).
+    file_indexes: list[Any] = field(default_factory=list)
+    #: app.security_model.graph.SecurityGraph.
+    security_graph: Any = None
+    #: app.understanding.architecture.ApplicationModel.
+    application_model: Any = None
+    #: app.understanding.attack_surface.AttackSurface.
+    attack_surface: Any = None
+    #: app.llm.graph_tools.GraphToolset — the read-only query surface handed to the reasoning layer.
+    toolset: Any = None
+    #: app.llm.context.ContextBuilder.
+    context_builder: Any = None
+    #: Sandbox-side module availability checker for engine selection.
+    module_checker: Any = None
+    #: candidate ref -> app.testing.synthesis.SynthesisResult.
+    synthesis: dict[str, Any] = field(default_factory=dict)
+    #: Executed test records (app.testing.executor.TestExecution).
+    test_executions: list[Any] = field(default_factory=list)
+    #: app.testing.regression.RegressionSuite.
+    regression_suite: Any = None
+    #: Accumulated coverage across the run (app.testing.coverage.CoverageObservation).
+    coverage: Any = None
+    #: Per-candidate model context records, for the model-context inspection view.
+    model_contexts: dict[str, Any] = field(default_factory=dict)
     descriptor: TargetDescriptor | None = None
     samhita: SamhitaResult | None = None
     benign_cases: list[dict[str, Any]] = field(default_factory=list)

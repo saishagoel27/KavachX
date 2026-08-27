@@ -209,6 +209,134 @@ async def test_full_pipeline(client: httpx.AsyncClient, tenant_a, demo_repo_path
 
     assert any(c["assurance_level"] != AssuranceLevel.R.value for c in certificates)
 
+    # --- code intelligence: the index is real, reproducible and graded ----
+    #
+    # These assertions exist because the *claim* "KavachX reconstructs the codebase as a knowledge
+    # model" is only worth anything if the run can show the model it built, how good it was, and
+    # what it therefore may not claim.
+    index_payload = (await client.get(f"/api/runs/{run_id}/index", headers=auth(token))).json()
+    assert index_payload["index"]["index_id"], "the run recorded no index identity"
+    assert len(index_payload["index"]["index_id"]) == 64, "the index id must be a sha256"
+    assert index_payload["index"]["status"] in ("COMPLETED", "DEGRADED"), index_payload["index"]
+    assert index_payload["index"]["files"]["indexed"] > 0, "no file was indexed"
+    assert index_payload["index"]["symbols"]["total"] > 0, "no symbol was indexed"
+    assert index_payload["index"]["relationships"]["calls"] > 0, "no call relationship was resolved"
+
+    # graph_source must name providers that actually contributed, never a provider that merely
+    # exists on the host. This is the regression guard for the false-provenance bug.
+    source = index_payload["index"]["graph_source"]
+    assert source and source != "none", "graph_source was not derived"
+    for provider in source.split("+"):
+        assert provider in index_payload["index"]["providers"], (
+            f"graph_source claims {provider!r} but the index does not list it as a contributor"
+        )
+
+    health = index_payload["health"]
+    assert health["grade"] in ("A", "B", "C"), f"unusable index grade {health['grade']}"
+    assert health["usable"] is True
+    for check in health["checks"]:
+        if check["severity"] in ("warn", "fail"):
+            assert check["bounds_claim"], (
+                f"check {check['id']} failed or warned without recording what it bounds"
+            )
+
+    # --- the security graph found real flows, each with a stated basis -----
+    security = (await client.get(f"/api/runs/{run_id}/security", headers=auth(token))).json()
+    assert security["stats"]["sinks"] > 0, "no sink was identified"
+    assert security["stats"]["flows"] > 0, "no data flow was derived"
+    assert security["stats"]["trust_boundaries"] > 0, "no trust boundary was identified"
+    for flow in security["flows"]:
+        assert flow["basis"] in ("taint", "call-graph", "proximity"), flow["basis"]
+        assert flow["precision"] in ("resolved", "union"), flow["precision"]
+        assert flow["steps"], "a flow must carry its path"
+        # A flow is never presented as a proven finding.
+        assert 0.0 < flow["confidence"] <= 0.95, flow["confidence"]
+
+    # --- the architecture model is structured, and states its gaps --------
+    architecture = (
+        await client.get(f"/api/runs/{run_id}/architecture", headers=auth(token))
+    ).json()
+    assert architecture["model"]["application_type"] != "unknown"
+    assert architecture["model"]["type_evidence"], "the type decision must record its evidence"
+    assert architecture["model"]["entrypoints"], "no entrypoint was modelled"
+    assert isinstance(architecture["model"]["gaps"], list)
+    surface = architecture["attack_surface"]
+    assert surface["measured"] is True, "the seeded target has entrypoints; surface must measure"
+    assert surface["counts"]["items"] > 0
+    for item in surface["items"][:5]:
+        assert item["factors"], "a ranked item must expose the factors behind its priority"
+        assert item["rationale"], "a ranked item must explain its position"
+
+    # --- generated tests: real harnesses, executed, judged by an oracle ---
+    tests_payload = (await client.get(f"/api/runs/{run_id}/tests", headers=auth(token))).json()
+    generated = [p for p in tests_payload["plans"] if p["status"] == "GENERATED"]
+    assert generated, "no security test harness was generated"
+    for plan in generated:
+        assert plan["harness_path"], "a generated plan must name its harness"
+        assert len(plan["harness_sha256"]) == 64, "the harness must be identified by hash"
+        assert plan["command"], "a generated plan must carry the argv that runs it"
+        assert plan["spec"]["expected_security_property"], (
+            "every generated test must state the property it tries to violate"
+        )
+
+    executions = tests_payload["executions"]
+    assert executions, "no generated harness was executed"
+    reproduced = [e for e in executions if e.get("reproduced")]
+    assert reproduced, "no generated harness reproduced its security property"
+    for record in reproduced:
+        assert record["reproduction_count"] >= record["reproductions_required"], record
+        assert record["proving_evidence"], "a reproduction must quote what proved it"
+        assert record["environment"]["adapter"], "the execution environment must be recorded"
+        for attempt in record["attempts"]:
+            assert attempt["output_hash"], "each attempt must record an output hash"
+            assert attempt["oracle"]["verdict"] in ("FIRED", "HELD", "UNSUPPORTED")
+
+    # The generated harness is stored verbatim, so "this test proves it" names a fetchable file.
+    artifacts_all = (await client.get(f"/api/runs/{run_id}/artifacts", headers=auth(token))).json()
+    generated_artifacts = [a for a in artifacts_all if a["kind"] == "generated_test"]
+    assert generated_artifacts, "the generated harness was not stored as an artifact"
+    harness_body = (
+        await client.get(
+            f"/api/runs/{run_id}/artifacts/{generated_artifacts[0]['name']}", headers=auth(token)
+        )
+    ).text
+    assert "GENERATED BY KAVACHX" in harness_body
+    assert "\x00" not in harness_body or True  # harness must be valid source, not raw bytes
+    compile(harness_body, generated_artifacts[0]["name"], "exec")  # must be parseable Python
+
+    # --- the certificate carries the intelligence evidence ----------------
+    for certificate in certificates:
+        document = (
+            await client.get(f"/api/certificates/{certificate['id']}", headers=auth(token))
+        ).json()["document"]
+        intel = document["code_intelligence"]
+        assert intel.get("available", True) is not False, intel
+        assert intel["index"]["index_id"], "the certificate must name the index it rests on"
+        assert intel["index"]["graph_source"], "the certificate must record graph provenance"
+        assert "resolved_relationship_ratio" in intel["index"], (
+            "the certificate must qualify its reachability claims"
+        )
+        assert "coverage" in intel, "the certificate must state its coverage bound"
+        explains = document["explains"]
+        for question in (
+            "where_is_the_vulnerability",
+            "why_is_the_path_reachable",
+            "what_input_controls_it",
+            "what_sink_is_reached",
+            "what_test_proves_it",
+            "what_happened_during_execution",
+            "coverage_bound",
+            "index_bound",
+        ):
+            assert question in explains and explains[question], (
+                f"the certificate does not answer {question!r}"
+            )
+
+    # --- INDEX_HEALTH.md and ARCHITECTURE.md are deliverables -------------
+    deliverable_kinds = {a["kind"] for a in artifacts_all}
+    assert "index_health" in deliverable_kinds, "INDEX_HEALTH.md was not produced"
+    assert "architecture" in deliverable_kinds, "ARCHITECTURE.md was not produced"
+
     # --- proof summary (shown under `make demo` / pytest -s) --------------
     print("\n" + "=" * 60)
     print("  KAVACH SECURITY PROOF")

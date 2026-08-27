@@ -88,21 +88,28 @@ const STATUS_STYLE: Record<PhaseStatus, { dot: string; text: string; ring: strin
 export function PipelineTimeline({
   phases,
   detail,
+  /**
+   * Which stages to render. Defaults to the full pipeline; pass the legacy list for a run recorded
+   * before the code-intelligence stages existed, so its missing stages are absent rather than
+   * shown stuck on "pending".
+   */
+  order = PIPELINE_PHASES,
 }: {
   phases: Record<string, PhaseStatus>;
   detail: Record<string, string>;
+  order?: readonly string[];
 }) {
-  const completed = PIPELINE_PHASES.filter((p) => phases[p] === "completed").length;
+  const completed = order.filter((p) => phases[p] === "completed").length;
 
   return (
     <Panel
       title="Pipeline"
-      subtitle={`${completed}/${PIPELINE_PHASES.length} stages complete`}
-      actions={<Progress value={(completed / PIPELINE_PHASES.length) * 100} />}
+      subtitle={`${completed}/${order.length} stages complete`}
+      actions={<Progress value={(completed / order.length) * 100} />}
       bodyClassName="p-3"
     >
       <ol className="space-y-0.5">
-        {PIPELINE_PHASES.map((phase, index) => {
+        {order.map((phase, index) => {
           const status = phases[phase] ?? "pending";
           const style = STATUS_STYLE[status];
           return (

@@ -43,12 +43,27 @@ IGNORED_DIRS = frozenset(
         ".ruff_cache",
         ".kavachx",
         "_kavachx",
+        #: GitNexus writes its LadybugDB index into a `.gitnexus/` directory *inside* the tree it
+        #: analyses. It must never be treated as target source: it contains a multi-megabyte
+        #: binary database and a parse cache, so indexing it would mean the indexer parsing its
+        #: own output, and hashing it would make the pinned-source digest depend on whether the
+        #: code graph had been built yet.
+        ".gitnexus",
         "dist",
         "build",
         ".next",
         "exports",
     }
 )
+
+#: Directories inside ``work/`` that survive :func:`reset_work`.
+#:
+#: ``_kavachx`` holds the injected harness and structured output. ``.gitnexus`` holds the code
+#: knowledge graph index, which is built once per run before any reset but is queried *throughout*
+#: it — the sibling hunt asks the graph for neighbouring sinks after every patch. Losing it on the
+#: first reset would silently downgrade the gauntlet's search space to whatever tree-sitter alone
+#: could see, mid-run, with nothing in the evidence saying so.
+PRESERVED_DIRS: tuple[str, ...] = ("_kavachx", ".gitnexus")
 
 IGNORED_SUFFIXES = frozenset(
     {".pyc", ".pyo", ".so", ".dll", ".dylib", ".exe", ".o", ".a", ".class", ".jar"}
@@ -136,23 +151,40 @@ def materialise(*, source: Path, workspace_root: Path, run_short: str) -> Pinned
 
 
 def reset_work(pinned: PinnedSource) -> None:
-    """Restore ``work/`` to the pinned tree, discarding any patch or target-side mutation."""
-    preserved = pinned.work / "_kavachx"
-    keep: dict[str, bytes] = {}
-    if preserved.is_dir():
-        for path in preserved.rglob("*"):
-            if path.is_file():
-                keep[str(path.relative_to(preserved))] = path.read_bytes()
+    """Restore ``work/`` to the pinned tree, discarding any patch or target-side mutation.
 
-    shutil.rmtree(pinned.work, ignore_errors=True)
-    shutil.copytree(pinned.pristine, pinned.work, dirs_exist_ok=True)
+    Everything in :data:`PRESERVED_DIRS` survives, because it belongs to KavachX rather than to
+    the target: the injected harness, and the code knowledge graph index the gauntlet keeps
+    querying between patches.
 
-    if keep:
-        target = pinned.work / "_kavachx"
-        for rel, data in keep.items():
-            out = target / rel
-            out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_bytes(data)
+    Preserved directories are **moved aside and moved back**, not read into memory. The code graph
+    index is a multi-megabyte binary database plus a parse cache; buffering it as bytes on every
+    reset — and there is one reset per patch iteration per finding — would be needless memory
+    churn in the same process that is supervising the run.
+    """
+    holding = pinned.root / f".reset-{uuid.uuid4().hex[:8]}"
+    moved: list[str] = []
+    try:
+        for name in PRESERVED_DIRS:
+            source = pinned.work / name
+            if not source.is_dir():
+                continue
+            holding.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(source), str(holding / name))
+            moved.append(name)
+
+        shutil.rmtree(pinned.work, ignore_errors=True)
+        shutil.copytree(pinned.pristine, pinned.work, dirs_exist_ok=True)
+
+        for name in moved:
+            destination = pinned.work / name
+            if destination.exists():
+                shutil.rmtree(destination, ignore_errors=True)
+            shutil.move(str(holding / name), str(destination))
+    finally:
+        # A crash between the move-aside and the move-back would otherwise leave the run's harness
+        # and code graph stranded in a holding directory with nothing pointing at them.
+        shutil.rmtree(holding, ignore_errors=True)
 
 
 def verify_pristine(pinned: PinnedSource) -> bool:

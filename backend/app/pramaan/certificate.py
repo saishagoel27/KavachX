@@ -332,6 +332,10 @@ def build_certificate(
     samhita_stats: dict[str, Any],
     sandbox_stats: dict[str, Any],
     provider_info: dict[str, Any],
+    #: Code-intelligence evidence summary from app.pramaan.intel_evidence.attach. Optional so a
+    #: caller that has not run the intelligence stages still produces a valid certificate — it
+    #: simply says so rather than omitting the section.
+    intel: dict[str, Any] | None = None,
     signing_key: str | None = None,
 ) -> CertificateResult:
     started = time.perf_counter()
@@ -493,6 +497,24 @@ def build_certificate(
             ),
         },
         "reasoning_provider": provider_info,
+        # --- code intelligence -------------------------------------------
+        #
+        # What was analysed, by what, at what fidelity, and what test proved it. Present as
+        # structured evidence rather than prose so a reader can check each claim against a node in
+        # the evidence graph below.
+        "code_intelligence": (
+            intel
+            if intel
+            else {
+                "available": False,
+                "reason": (
+                    "This run did not produce code-intelligence evidence: the index, security "
+                    "graph and generated-test stages did not contribute to this finding. Any "
+                    "reachability claim here rests on the world model alone."
+                ),
+            }
+        ),
+        "explains": (intel or {}).get("explains", {}),
         "evidence_graph": graph.as_dict(),
         "evidence_summary": graph.stats(),
     }

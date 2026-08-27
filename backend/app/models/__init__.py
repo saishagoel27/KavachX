@@ -13,6 +13,14 @@ from app.models.identity import (
     OrganisationMember,
     User,
 )
+from app.models.indexing import (
+    ArchitectureModelRow,
+    GeneratedTest,
+    ModelContextRow,
+    RepositoryIndex,
+    SecurityModelRow,
+    TestExecutionRow,
+)
 from app.models.pramaan import Certificate, EvidenceEdge, EvidenceNode
 from app.models.project import DEFAULT_FORBIDDEN_GLOBS, Policy, Project, Repository
 from app.models.repair import GauntletResult, GauntletRun, Patch
@@ -20,6 +28,7 @@ from app.models.run import Artifact, Run, RunCheckpoint, RunEvent, WorldModel
 
 __all__ = [
     "DEFAULT_FORBIDDEN_GLOBS",
+    "ArchitectureModelRow",
     "Artifact",
     "AuditAction",
     "AuditEvent",
@@ -30,19 +39,24 @@ __all__ = [
     "Finding",
     "GauntletResult",
     "GauntletRun",
+    "GeneratedTest",
     "GithubInstallation",
     "Hypothesis",
+    "ModelContextRow",
     "Organisation",
     "OrganisationMember",
     "Patch",
     "Policy",
     "Project",
     "Repository",
+    "RepositoryIndex",
     "Run",
     "RunCheckpoint",
     "RunEvent",
     "SamhitaClause",
+    "SecurityModelRow",
     "Shield",
+    "TestExecutionRow",
     "User",
     "WorldModel",
 ]
