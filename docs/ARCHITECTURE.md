@@ -34,6 +34,10 @@ This is enforced structurally, not by convention:
 
 ## Component map
 
+The horizontal view of the same thing lives in [diagrams/architecture.mmd](diagrams/architecture.mmd)
+and is rendered inline in the root [README](../README.md#architecture); exports for slides are in
+[diagrams/](diagrams/README.md). The ASCII map below is the one that stays correct in a terminal.
+
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │ frontend/  Next.js 16 · App Router                                            │

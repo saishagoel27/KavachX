@@ -1,0 +1,77 @@
+%%{init: {"theme":"base","themeVariables":{"clusterBkg":"#151719","clusterBorder":"#3a494b","titleColor":"#00dbe7","nodeTextColor":"#e3e2e2","textColor":"#e3e2e2","lineColor":"#8fa1a3","edgeLabelBackground":"#dfe4e5","tertiaryTextColor":"#e3e2e2","labelTextColor":"#e3e2e2","fontSize":"15px"}}}%%
+flowchart LR
+  classDef det fill:#0d2b2f,stroke:#00c8d4,stroke-width:1.5px,color:#e6f6f7
+  classDef llm fill:#241a38,stroke:#a78bfa,stroke-width:2px,color:#ece7fb
+  classDef gate fill:#3a2c08,stroke:#f5b642,stroke-width:2.5px,color:#fdf3dd
+  classDef sbx fill:#37150f,stroke:#ff6b5e,stroke-width:2.5px,color:#ffe8e5
+  classDef out fill:#0f2a19,stroke:#3ddc84,stroke-width:1.5px,color:#e4f8ec
+  classDef store fill:#1b1b20,stroke:#6b7280,color:#d6d6da
+
+  subgraph L1["1 · CODE INTELLIGENCE — fully deterministic, no model"]
+    direction TB
+    REPO["<b>Target repository</b><br/>pinned to an immutable content SHA-256<br/><i>untrusted DATA, never instructions</i>"]:::det
+    GN["<b>GitNexus</b> provider (optional)<br/>resolved symbol references<br/><i>precise, incomplete</i>"]:::det
+    TS["<b>tree-sitter</b> provider (always on)<br/>name-matched references, 3 grammars<br/><i>complete, imprecise</i>"]:::det
+    MERGE["<b>Provider merge</b><br/>per-EDGE provenance + precision<br/>resolved vs union"]:::det
+    KG["<b>Code knowledge graph</b><br/>reproducible identity =<br/>sha256(source + parser versions + options)"]:::det
+    HEALTH{{"<b>Index validation</b><br/>10 deterministic checks<br/>grade A/B/C/F<br/><b>+ CLAIM BOUNDS</b><br/>what this index cannot support"}}:::gate
+    REPO --> GN
+    REPO --> TS
+    GN --> MERGE
+    TS --> MERGE
+    MERGE --> KG --> HEALTH
+  end
+
+  subgraph L2["2 · SECURITY MODEL — deterministic, taxonomy-driven"]
+    direction TB
+    TAX["<b>60 taxonomy rules</b>, extensible<br/>19 sources · 23 sinks · 9 sanitizers<br/>5 validators · 4 auth controls"]:::det
+    TAINT["<b>Taint analysis</b> over the AST<br/>proves derivation inside a function"]:::det
+    FLOW["<b>Security flows</b><br/>every flow states its <b>basis</b><br/>taint / call-graph / proximity<br/>+ precision + reachability"]:::det
+    BOUND["<b>Trust boundaries</b><br/>11 kinds, derived from<br/>(source kind, sink kind)"]:::det
+    SURF["<b>Attack surface</b><br/>priority = <b>product</b> of 6 recorded factors<br/>severity · controllability · reachability<br/>· dataflow · controls · coverage"]:::det
+    TAX --> TAINT --> FLOW --> BOUND --> SURF
+  end
+
+  subgraph L3["3 · REASONING — the ONLY place a model is consulted"]
+    direction TB
+    CTX["<b>Context builder</b><br/>24 read-only graph tools<br/>hard character budget<br/>trust-labelled envelope:<br/>UNTRUSTED_repository_code<br/>every drop reported, every query logged"]:::det
+    LLM["<b>Local LLM — proposes only</b><br/>Qwen3-Coder-30B-A3B (<b>3B active</b>)<br/>+ Qwen3-4B router<br/>llama.cpp / Ollama / vLLM<br/>12 routed tasks<br/><i>air-gapped: no token leaves</i>"]:::llm
+    SCHEMA{{"<b>Strict schema gate</b><br/>Pydantic TestSpec / PatchProposal<br/><b>NO field can assert a verdict</b><br/>reject &rarr; the deterministic<br/>fallback still runs"}}:::gate
+    CTX --> LLM --> SCHEMA
+  end
+
+  subgraph L4["4 · PROOF BY EXECUTION — the sandbox decides"]
+    direction TB
+    HARN["<b>Harness generator</b><br/>KavachX templates only<br/>model strings become<br/><b>DATA LITERALS</b>, never code"]:::det
+    SBX["<b>SANDBOX</b> — hostile code runs here<br/>no credentials · no network · non-root<br/>dropped caps · read-only root · capped<br/>dev | gVisor | Firecracker"]:::sbx
+    FUZZ["<b>Coverage-guided fuzzing</b><br/>13 engines, 6 with coverage feedback<br/>code-aware branch seeding<br/>useful = <b>measured</b> coverage delta"]:::det
+    ORACLE{{"<b>13 deterministic oracles</b><br/><b>UNSUPPORTED is not HELD</b><br/>N independent reproductions<br/>required before VALIDATED"}}:::gate
+    HARN --> SBX --> FUZZ --> ORACLE
+  end
+
+  subgraph L5["5 · REPAIR AND ADVERSARIAL VERIFICATION"]
+    direction TB
+    SHIELD["<b>Shield</b> — reversible mitigation<br/>verified blocking AND benign-safe<br/>starts TIME TO PROTECTION"]:::det
+    REG["<b>Regression test</b> from the ACTUAL<br/>reproducing input, proven to fire<br/>on the <b>unpatched</b> build first"]:::det
+    ROOT["Root cause located and verified<br/>on the executed path<br/>blast radius computed"]:::det
+    PATCH["Patch synthesised · AST policy gate<br/>applied to a <b>COPY</b> in the sandbox"]:::det
+    GAUNT{{"<b>REFUTATION GAUNTLET</b><br/>it attacks its own patch<br/>exploit mutation · sibling hunt<br/>differential replay · SAMHITA re-check<br/><i>refuted &rarr; bypass becomes a constraint</i>"}}:::gate
+    SHIELD --> ROOT --> PATCH --> GAUNT
+    REG --> GAUNT
+  end
+
+  subgraph L6["6 · PROOF-CARRYING OUTPUT"]
+    direction TB
+    PRAMAAN["<b>PRAMAAN evidence graph</b><br/>13 node types<br/><b>dangling-claim REFUSAL</b><br/>assurance A/B/C/R by rule<br/>HMAC-signed<br/>answers 9 'how do you know' questions"]:::out
+    PUB["<b>Publisher</b><br/>the <b>ONLY</b> credential holder<br/>never executes repository code<br/>re-runs the policy gate<br/>new branch only, never force<br/>human approval gate"]:::out
+    STORE["PostgreSQL 16 or SQLite<br/>29 tables · checkpoint after every node<br/>append-only hash-chained audit log"]:::store
+    PRAMAAN --> PUB
+    PRAMAAN -.-> STORE
+  end
+
+  L1 -- "graded graph<br/>+ stated bounds" --> L2
+  L2 -- "ranked candidates" --> L3
+  L3 -- "validated TestSpec<br/>+ patch proposals" --> L4
+  L2 -- "deterministic fallback:<br/>the whole pipeline runs<br/>with NO model at all" --> L4
+  L4 -- "reproduced &rArr; VALIDATED<br/>not reproduced &rArr;<br/>stays a hypothesis" --> L5
+  L5 -- "survives all 4 stages &rArr; VERIFIED<br/>refuted &rArr; retry under<br/>a hard constraint" --> L6

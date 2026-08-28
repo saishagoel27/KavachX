@@ -1,0 +1,64 @@
+%%{init: {"theme":"base","themeVariables":{"clusterBkg":"#151719","clusterBorder":"#3a494b","titleColor":"#00dbe7","nodeTextColor":"#e3e2e2","textColor":"#e3e2e2","lineColor":"#8fa1a3","edgeLabelBackground":"#dfe4e5","tertiaryTextColor":"#e3e2e2","labelTextColor":"#e3e2e2","fontSize":"16px"}}}%%
+flowchart LR
+  classDef det fill:#0d2b2f,stroke:#00c8d4,stroke-width:2px,color:#e6f6f7
+  classDef llm fill:#241a38,stroke:#a78bfa,stroke-width:2px,color:#ece7fb
+  classDef gate fill:#3a2c08,stroke:#f5b642,stroke-width:2.5px,color:#fdf3dd
+  classDef sbx fill:#37150f,stroke:#ff6b5e,stroke-width:2.5px,color:#ffe8e5
+  classDef out fill:#0f2a19,stroke:#3ddc84,stroke-width:2px,color:#e4f8ec
+
+  subgraph A["1 · INDEX &amp; GRADE"]
+    direction TB
+    REPO["<b>Repository</b><br/>pinned to an immutable<br/>content SHA-256<br/><i>untrusted DATA, not instructions</i>"]:::det
+    KG["<b>Code knowledge graph</b><br/>GitNexus resolved refs<br/>+ tree-sitter name matches<br/>merged, per-EDGE provenance<br/>reproducible index_id"]:::det
+    HL{{"<b>Index health</b><br/>10 checks &rarr; grade A/B/C/F<br/><b>+ CLAIM BOUNDS</b><br/>what this index cannot support"}}:::gate
+    REPO --> KG --> HL
+  end
+
+  subgraph B["2 · SECURITY MODEL"]
+    direction TB
+    TAX["<b>60 taxonomy rules</b><br/>19 sources · 23 sinks<br/>9 sanitizers · 5 validators<br/>4 auth controls"]:::det
+    TAINT["<b>Taint analysis</b> over the AST<br/>proves derivation<br/>inside a function"]:::det
+    AS["<b>Attack surface</b><br/>every flow states its basis<br/>taint / call-graph / proximity<br/>priority = product of<br/>6 recorded factors"]:::det
+    TAX --> TAINT --> AS
+  end
+
+  subgraph C["3 · LLM PROPOSES"]
+    direction TB
+    CTX["<b>Bounded context</b><br/>24 read-only graph tools<br/>hard character budget<br/>trust-labelled envelope<br/>every drop reported"]:::det
+    LLM["<b>Local model</b><br/>Qwen3-Coder 30B-A3B<br/><b>3B active params</b><br/>+ Qwen3-4B router<br/><i>air-gapped, nothing leaves</i>"]:::llm
+    SG{{"<b>Schema gate</b><br/>Pydantic, strict<br/><b>no field can assert<br/>a verdict</b><br/>reject &rarr; fallback runs"}}:::gate
+    CTX --> LLM --> SG
+  end
+
+  subgraph D["4 · SYSTEM VALIDATES"]
+    direction TB
+    HARN["<b>Harness generator</b><br/>KavachX templates only<br/>model text becomes a<br/><b>DATA LITERAL</b>, never code"]:::det
+    SBX["<b>SANDBOX</b><br/>hostile code runs here<br/>no credentials · no network<br/>non-root · dropped caps<br/>dev | gVisor | Firecracker"]:::sbx
+    FZ["<b>Coverage-guided fuzzing</b><br/>13 engines, 6 with feedback<br/>code-aware branch seeding<br/>useful = coverage moved"]:::det
+    OR{{"<b>13 deterministic oracles</b><br/><b>UNSUPPORTED is not HELD</b><br/>N independent<br/>reproductions required"}}:::gate
+    HARN --> SBX --> FZ --> OR
+  end
+
+  subgraph E["5 · ADVERSARIAL REPAIR"]
+    direction TB
+    SH["<b>Shield</b> — reversible<br/>verified blocking AND<br/>benign-safe"]:::det
+    RG["<b>Regression test</b> from the<br/>REAL reproducing input<br/>proven to fire on the<br/>unpatched build first"]:::det
+    PT["Root cause on the executed path<br/>patch + AST policy gate<br/>applied to a COPY"]:::det
+    GT{{"<b>REFUTATION GAUNTLET</b><br/>it attacks its own patch<br/>mutation · siblings<br/>replay · contract re-check"}}:::gate
+    SH --> PT --> GT
+    RG --> GT
+  end
+
+  subgraph F["6 · PROOF"]
+    direction TB
+    PR["<b>PRAMAAN certificate</b><br/>evidence graph, 13 node types<br/>HMAC-signed<br/>assurance A/B/C/R by rule<br/><b>refuses a dangling claim</b>"]:::out
+    PB["<b>Publisher</b><br/>the ONLY credential holder<br/>never runs repository code<br/>new branch only<br/>human approval gate"]:::out
+    PR --> PB
+  end
+
+  A -- "graded graph<br/>+ stated bounds" --> B
+  B -- "ranked candidates" --> C
+  C -- "validated TestSpec" --> D
+  B -- "fallback: the pipeline<br/>runs with NO model" --> D
+  D -- "reproduced &rArr; VALIDATED<br/>not reproduced &rArr; stays a hypothesis" --> E
+  E -- "survives 4 stages &rArr; VERIFIED<br/>refuted &rArr; retry under a hard constraint" --> F
