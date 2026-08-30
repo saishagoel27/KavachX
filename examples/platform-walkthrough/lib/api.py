@@ -30,15 +30,27 @@ class Unreachable(RuntimeError):
 
 
 class Api:
-    """Thin JSON client. ``token`` is set once by :meth:`login`."""
+    """Thin JSON client that keeps itself signed in.
+
+    The access token lives for 30 minutes by default, and a walkthrough outlives that easily: a
+    deep analysis takes a while, and presenter mode adds however long the operator spends reading
+    each act. Re-authenticating on a 401 is therefore not a nicety — without it a long run ends in
+    a stack trace instead of a verdict, after the pipeline has already done all the work.
+    """
+
+    #: Paths that must never trigger the re-authenticate-and-retry path, or a bad password would
+    #: recurse instead of failing with the server's own message.
+    _AUTH_PATHS = ("/api/auth/login", "/api/auth/refresh")
 
     def __init__(self, base: str, *, timeout: int = 60) -> None:
         self.base = base.rstrip("/")
         self.token = ""
         self.timeout = timeout
+        self._credentials: tuple[str, str] | None = None
+        self.reauthentications = 0
 
     # -- transport ---------------------------------------------------------
-    def _call(self, method: str, path: str, body: dict | None = None) -> Any:
+    def _call(self, method: str, path: str, body: dict | None = None, *, retry: bool = True) -> Any:
         url = f"{self.base}{path}"
         data = json.dumps(body).encode("utf-8") if body is not None else None
         request = urllib.request.Request(url, data=data, method=method)
@@ -52,7 +64,17 @@ class Api:
                 raw = response.read().decode("utf-8")
                 return json.loads(raw) if raw.strip() else {}
         except urllib.error.HTTPError as exc:
-            raise ApiError(method, path, exc.code, exc.read().decode("utf-8")[:1200]) from exc
+            detail = exc.read().decode("utf-8")[:1200]
+            if (
+                exc.code == 401
+                and retry
+                and self._credentials is not None
+                and not path.startswith(self._AUTH_PATHS)
+            ):
+                self.reauthentications += 1
+                self.login(*self._credentials)
+                return self._call(method, path, body, retry=False)
+            raise ApiError(method, path, exc.code, detail) from exc
         except urllib.error.URLError as exc:
             raise Unreachable(f"could not reach {url}: {exc.reason}") from exc
 
@@ -64,7 +86,7 @@ class Api:
     def post(self, path: str, body: dict | None = None) -> Any:
         return self._call("POST", path, body or {})
 
-    def get_raw(self, path: str) -> bytes:
+    def get_raw(self, path: str, *, retry: bool = True) -> bytes:
         """Fetch a non-JSON body (certificate download)."""
         request = urllib.request.Request(f"{self.base}{path}", method="GET")
         if self.token:
@@ -73,15 +95,25 @@ class Api:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 return response.read()
         except urllib.error.HTTPError as exc:
-            raise ApiError("GET", path, exc.code, exc.read().decode("utf-8")[:1200]) from exc
+            detail = exc.read().decode("utf-8")[:1200]
+            if exc.code == 401 and retry and self._credentials is not None:
+                self.reauthentications += 1
+                self.login(*self._credentials)
+                return self.get_raw(path, retry=False)
+            raise ApiError("GET", path, exc.code, detail) from exc
         except urllib.error.URLError as exc:
             raise Unreachable(f"could not reach {self.base}{path}: {exc.reason}") from exc
 
     # -- auth --------------------------------------------------------------
     def login(self, email: str, password: str) -> dict:
-        payload = self.post("/api/auth/login", {"email": email, "password": password})
+        # Held so an expired token can be replaced transparently mid-run. They are the demo
+        # operator's credentials, passed on the command line, and never leave this process.
+        self._credentials = (email, password)
+        payload = self._call(
+            "POST", "/api/auth/login", {"email": email, "password": password}, retry=False
+        )
         self.token = payload["access_token"]
-        return self.get("/api/auth/me")
+        return self._call("GET", "/api/auth/me")
 
     # -- run following -----------------------------------------------------
     def follow(
