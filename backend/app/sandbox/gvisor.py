@@ -171,6 +171,29 @@ class GvisorSandboxAdapter(SandboxAdapter):
         for item in (Path(__file__).parent / "harness").glob("*.py"):
             shutil.copy2(item, self.harness_dir / item.name)
 
+        # The execute phase runs as uid 65534 ('nobody'), but this directory was created by the
+        # backend process and is owned by it. Without a permissive mode nothing inside the
+        # container can write here, and the failure is worse than it sounds: the guard report is
+        # silently lost, and `/usr/bin/time -o` cannot create its file, which GNU time reports by
+        # exiting **125** — which is indistinguishable from the target itself crashing. Every
+        # execution then looks like a crash, so observation records nothing, the fuzzer finds
+        # nothing, a validator reads the 125 as a reproduced boundary bug, and every patch is
+        # "refuted" because the exploit still "reproduces" no matter what the patch does.
+        self._instrumentation_writable = True
+        try:
+            os.chmod(self.output_dir, 0o777)
+        except OSError as exc:
+            self._instrumentation_writable = False
+            logger.warning(
+                "sandbox.output_dir_not_shareable", path=str(self.output_dir), error=str(exc)
+            )
+
+        # Measurement must never be the reason a run fails. If the sandbox user cannot write to
+        # the bind, drop the `time` wrapper rather than letting it take every execution down.
+        if self._have_time and not self._instrumentation_writable:
+            self._have_time = False
+            logger.warning("sandbox.rusage_disabled", reason="output dir is not writable as nobody")
+
         logger.info("sandbox.start", adapter=self.name, image=self.image, session=self.session_id)
 
     # ------------------------------------------------------------------
