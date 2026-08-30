@@ -182,15 +182,27 @@ def _first_launchable(path: Path) -> Path | None:
 
 
 def _repo_local_candidates() -> list[Path]:
-    """Repo-local install locations, in the order ``make gitnexus`` produces them."""
+    """Repo-local install locations, in the order ``make gitnexus`` produces them.
+
+    GitNexus lives in its own ``gitnexus/`` directory rather than at the repository root: it is
+    the only Node dependency the backend has, and keeping its manifest, lockfile and
+    ``node_modules`` out of the root stops a PolyForm Noncommercial package from looking like a
+    root-level dependency of KavachX itself. The pre-move root install is still accepted as a
+    fallback so a checkout that ran ``make gitnexus`` before the move keeps its resolved graph
+    instead of silently dropping to tree-sitter-only.
+    """
     root = settings.repo_root
-    return [root / "node_modules" / ".bin" / "gitnexus"]
+    return [
+        root / "gitnexus" / "node_modules" / ".bin" / "gitnexus",
+        root / "node_modules" / ".bin" / "gitnexus",
+    ]
 
 
 def resolve_command() -> GitNexusInfo:
     """Find a runnable GitNexus, in a documented order of authority.
 
-    ``GITNEXUS_BIN`` → ``PATH`` → repo-local ``node_modules/.bin`` → ``npx`` (opt-in only).
+    ``GITNEXUS_BIN`` → ``PATH`` → repo-local ``gitnexus/node_modules/.bin`` → ``npx`` (opt-in
+    only).
 
     ``npx`` is last and off by default because it reaches the network on first use per machine
     and is slow; an indexer that silently downloads a package mid-run is not something a security
@@ -235,7 +247,7 @@ def resolve_command() -> GitNexusInfo:
     if not info.command:
         info.reason = (
             "GitNexus was not found. Install it repo-locally with `make gitnexus` (or "
-            "`npm install` at the repository root), install it globally with "
+            "`npm install` in the `gitnexus/` directory), install it globally with "
             "`npm install -g gitnexus`, or set GITNEXUS_BIN. Without it KavachX indexes with "
             "tree-sitter only and every reachability claim is name-matched rather than resolved."
         )

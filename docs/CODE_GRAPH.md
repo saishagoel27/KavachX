@@ -305,7 +305,7 @@ the operator instead of only the log.
 GitNexus is resolved in a documented order of authority:
 
 ```
-GITNEXUS_BIN  →  PATH  →  <repo>/node_modules/.bin  →  npx (opt-in)
+GITNEXUS_BIN  →  PATH  →  <repo>/gitnexus/node_modules/.bin  →  npx (opt-in)
 ```
 
 `npx` is last and **off by default**: it reaches the network on first use per machine and is slow,
@@ -315,7 +315,7 @@ unasked.
 Repo-local install:
 
 ```bash
-make gitnexus       # GITNEXUS_SKIP_OPTIONAL_GRAMMARS=1 npm install, at the repository root
+make gitnexus       # GITNEXUS_SKIP_OPTIONAL_GRAMMARS=1 npm install, in the gitnexus/ directory
 make gitnexus-doctor
 ```
 
@@ -348,7 +348,7 @@ deliberate and has two consequences worth stating plainly:
 Attribution and the licence are reported at runtime by `GET /api/system/gitnexus`, so an operator
 does not have to read this file to find out.
 
-`package.json` at the repository root declares the dependency and carries
+`gitnexus/package.json` declares the dependency and carries
 `"license": "SEE LICENSE IN docs/CODE_GRAPH.md"` rather than asserting a licence of its own.
 
 ---

@@ -183,6 +183,14 @@ export interface Repository {
   authority_evidence: Record<string, unknown>;
 }
 
+export interface GithubConfig {
+  configured: boolean;
+  auth: string;
+  publisher_dry_run: boolean;
+  dev_mode_local_target_available: boolean;
+  notes: string;
+}
+
 export interface SystemLimits {
   run_max_runtime_seconds: number;
   sandbox: {
@@ -878,7 +886,16 @@ export const endpoints = {
       // repository still on "master".
       default_branch,
     }),
-  githubApp: () => api.get<Record<string, any>>("/api/github/app"),
+  // The token-verified path. No `public` and no `local_seeded` flag, so the backend takes the
+  // fine-grained-token branch: it confirms push access against the GitHub API before attaching,
+  // which is what makes this the only provider that can later open a pull request.
+  attachGithubRepo: (projectId: string, full_name: string, default_branch = "") =>
+    api.post<Repository>(`/api/projects/${projectId}/repositories`, {
+      full_name,
+      default_branch,
+      authorisation_confirmed: true,
+    }),
+  githubApp: () => api.get<GithubConfig>("/api/github/app"),
 
   dashboard: () => api.get<Dashboard>("/api/dashboard"),
   runs: (limit = 50) => api.get<Run[]>(`/api/runs?limit=${limit}`),

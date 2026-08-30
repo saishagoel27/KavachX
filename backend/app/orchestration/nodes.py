@@ -70,6 +70,13 @@ from app.validator.service import Validator
 
 logger = get_logger(__name__)
 
+#: Providers whose source is fetched into a disposable staging directory at ingest, rather than
+#: read from a path the operator already has on disk. Their staging copy is deleted once the tree
+#: has been pinned; a ``local_seeded`` target is the operator's own tree and is never touched.
+_FETCHED_PROVIDERS = frozenset(
+    {RepositoryProvider.GITHUB_PUBLIC.value, RepositoryProvider.GITHUB.value}
+)
+
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -300,6 +307,60 @@ async def node_ingest(ctx: RunContext, state: KavachState) -> KavachState:
                 source="ingest",
             )
 
+    elif provider == RepositoryProvider.GITHUB.value:
+        # A repository the configured fine-grained token has push access to — confirmed at attach
+        # time, and the only kind KavachX can later open a pull request against. It is cloned
+        # rather than downloaded: the publisher's base commit and the console's provenance both
+        # refer to a real commit, and a clone is what produces one.
+        #
+        # This still happens outside the sandbox. The credential never enters the workspace: the
+        # clone module strips .git before returning, so nothing downstream can reach a remote.
+        from app.github import git_ingest
+
+        staging = ctx.workspace_root / f"clone-{ctx.short_code.lower()}-{ctx.run_id.hex[:6]}"
+        await ctx.emitter.phase_start(phase, f"cloning {repository.get('full_name', '')}")
+        started = time.perf_counter()
+        try:
+            fetch_evidence = await git_ingest.clone_repository(
+                full_name=str(repository.get("full_name", "")),
+                revision=resolved_commit or str(run.get("branch") or "") or "",
+                destination=staging,
+            )
+        except Exception as exc:
+            await ctx.emitter.phase_failed(phase, f"clone failed: {exc}")
+            await _mark_phase(ctx, phase, "failed")
+            state["errors"] = [
+                *state.get("errors", []),
+                {"phase": phase, "error": f"clone failed: {exc}", "at": now_iso()},
+            ]
+            state["aborted"] = True
+            return state
+
+        resolved_commit = str(fetch_evidence["commit"]["sha"])
+        source_path = str(staging)
+        clone_record = fetch_evidence["clone"]
+        await ctx.emitter.tool(
+            name="git:clone",
+            target=f"{repository.get('full_name', '')}@{resolved_commit[:12]}",
+            ms=int((time.perf_counter() - started) * 1000),
+            ok=True,
+            detail=(
+                f"{clone_record['files']} files, {clone_record['bytes']} bytes, "
+                f"branch {clone_record['branch']}, depth {clone_record['depth']}, "
+                f"submodules not followed"
+            ),
+        )
+        removed = clone_record["symlinks_removed"]
+        if removed:
+            # Reported, not silently dropped: materialise() dereferences symlinks, so a link out
+            # of the tree would otherwise copy the file it points at into the pinned artifact.
+            await ctx.emitter.log(
+                f"removed {len(removed)} symlink(s) from the checkout before pinning: "
+                + ", ".join(f"{s['path']} -> {s['target']}" for s in removed[:5]),
+                stream="stderr",
+                source="ingest",
+            )
+
     if not source_path:
         await ctx.emitter.phase_failed(phase, "the repository has no resolvable source location")
         await _mark_phase(ctx, phase, "failed")
@@ -317,8 +378,9 @@ async def node_ingest(ctx: RunContext, state: KavachState) -> KavachState:
     )
     ctx.pinned = pinned
 
-    # The fetched staging copy has served its purpose; pristine/ is now the pinned artifact.
-    if provider == RepositoryProvider.GITHUB_PUBLIC.value and fetch_evidence:
+    # The fetched or cloned staging copy has served its purpose; pristine/ is now the pinned
+    # artifact. A local target is left alone — it is the operator's own tree, not a copy.
+    if provider in _FETCHED_PROVIDERS and fetch_evidence:
         shutil.rmtree(source_path, ignore_errors=True)
 
     # The sandbox image is the target's toolchain. Pick it now so a Node/Java/Go/Rust target gets an

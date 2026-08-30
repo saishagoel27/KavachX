@@ -43,6 +43,44 @@ the console at the same time. It differs from `make demo` in three ways that mat
 `--pause` waits for Enter between acts. That folder's README is the presenter's script: what each
 act shows, and what to say while it is on screen.
 
+### Against a real GitHub repository, from the console
+
+The seeded target is a fixture. To demo against a repository that actually exists on GitHub,
+there are two paths and they differ in exactly one respect — whether a pull request can come out
+of the other end.
+
+**A repository you can push to — the full loop, including the pull request.**
+
+```bash
+# once, on the backend host
+GITHUB_TOKEN=github_pat_...        # fine-grained: Contents read/write, Pull requests read/write
+PUBLISHER_DRY_RUN=false            # leave true to see the payload without opening a PR
+```
+
+Then in the console: **New Security Run → "Attach a repository you can push to"** → paste
+`https://github.com/your-org/your-service` → KavachX asks GitHub whether that token really has
+`push` and refuses the attach if it does not → tick the authorisation box → **Verify push access
+and attach** → select it → **Start KavachX Analysis**.
+
+At ingest the backend performs a real `git clone`
+([`git_ingest.py`](../backend/app/github/git_ingest.py)) — outside the sandbox, credential passed
+by environment rather than in the URL or argv, submodules not followed, symlinks stripped, size and
+file count capped, `.git` removed before the tree is pinned. The run then proceeds exactly as it
+does for the seeded target, and a gauntlet-verified repair can be approved into a real `kavachx/`
+branch and pull request.
+
+The same thing from the terminal, narrated:
+
+```bash
+python examples/platform-walkthrough/walkthrough.py --github your-org/your-service --pause
+```
+
+**A public repository — everything except the pull request.** **New Security Run → "add a public
+repo"**. Source is fetched from GitHub at a resolved commit SHA and analysed in full, but the
+publish gate blocks with a stated reason: KavachX holds no credential for a repository it does not
+control, so it can read and execute the source but can never open a pull request against it. See
+[`PR_BOT.md`](PR_BOT.md) for what would have to be decided to change that.
+
 ### Or drive it from the browser
 
 Bring the stack up (`make dev`, or the two `uv run uvicorn` / `npm run dev` processes) then open

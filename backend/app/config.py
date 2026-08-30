@@ -133,7 +133,7 @@ class Settings(BaseSettings):
     # docs/CODE_GRAPH.md.
     gitnexus_enabled: bool = True
     #: Explicit path to the binary. Highest authority in the resolution chain:
-    #: GITNEXUS_BIN -> PATH -> <repo>/node_modules/.bin -> npx (opt-in).
+    #: GITNEXUS_BIN -> PATH -> <repo>/gitnexus/node_modules/.bin -> npx (opt-in).
     gitnexus_bin: str = ""
     #: Version used when resolving through npx, and recorded in the index identity.
     gitnexus_version: str = "1.6.9"
@@ -192,9 +192,17 @@ class Settings(BaseSettings):
 
     # --- github (fine-grained personal access token) -----------------------
     # A fine-grained PAT with Contents: read/write and Pull requests: read/write, scoped to the
-    # repositories KavachX may open pull requests against. There is no GitHub App path.
+    # repositories KavachX may open pull requests against. There is no GitHub App path — see
+    # docs/PR_BOT.md for the decisions that would introduce one.
+    #
+    # The same token is used twice, at opposite ends of a run: to clone the source at ingest
+    # (app/github/git_ingest.py) and to open the pull request at publish (app/publisher). Neither
+    # is reachable from the sandbox, and it is never written to the database.
     github_token: str = ""
     github_api_base: str = "https://api.github.com"
+    #: Clone origin for the token-verified provider. Separate from the API base because GitHub
+    #: Enterprise serves git and the REST API from different hosts.
+    github_clone_base: str = "https://github.com"
     publisher_dry_run: bool = True
 
     # --- demo seed ---------------------------------------------------------

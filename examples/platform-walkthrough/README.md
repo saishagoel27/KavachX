@@ -35,7 +35,40 @@ make frontend         # the console on :3000 — keep this running, in another t
 `make dev` runs the last two together. `make bootstrap` creates the demo operator
 `demo@kavachx.io` / `kavachx-demo-2024`.
 
-### The walkthrough
+### Option A — verify the walkthrough itself (no server, seconds)
+
+Same shape as [`../fuzz-target-demo`](../fuzz-target-demo)'s `verify_fuzzer.py`: a self-checking
+script with a real exit code, so the example can be checked before the stack is even up.
+
+```bash
+python examples/platform-walkthrough/verify_walkthrough.py
+```
+
+It drives the real code — `lib.gitwork` against a repository it builds on disk (origin, clone,
+branch, commit, push, read-back from the origin), then every rendering act in `walkthrough.py`
+against payloads shaped like the real API's. Then the part that matters:
+
+```
+[1] git layer - origin, clone, branch, commit, push          OK
+[2] every act renders a populated run                        OK
+[3] every act FAILS when the run produced nothing            OK
+[4] a run where every stage ran and every stage failed       OK
+[5] the final verdict is computed, not asserted              OK
+```
+
+Check **[4]** is the one that earns its keep. With no records at all, several acts take an early
+return — so an act that claims success without consulting its own evidence slips past. Giving it a
+full set of *failed* records forces it down its normal path. Sabotage `act_repair` to record `True`
+unconditionally and [4] catches it by name:
+
+```
+FAIL: acts claimed success on a run that succeeded at nothing:
+      {'repair': '1 iteration(s): 0 verified, 1 refuted first'}
+```
+
+Exit `0` = the git layer works, every act renders, and every act fails when it should.
+
+### Option B — the full walkthrough (needs the stack)
 
 Standard library only — there is nothing to install for this script.
 
@@ -55,6 +88,30 @@ is a check, not a demo that always prints PASS.
 Run it on the backend host. Act 1 clones into `examples/`, which the API resolves on its own
 filesystem; against a remote backend use `--skip-clone --repository examples/vulnerable-demo`
 along with `--api` and `--frontend`.
+
+### Against a real GitHub repository
+
+```bash
+python examples/platform-walkthrough/walkthrough.py --github your-org/your-service --pause
+```
+
+With `--github` the walkthrough clones nothing itself. It attaches the repository through the
+token-verified path — the backend asks GitHub whether the configured `GITHUB_TOKEN` really has
+`push` access and refuses the attach if it does not — and the **backend** clones it at ingest
+([`git_ingest.py`](../../backend/app/github/git_ingest.py)): outside the sandbox, credential passed
+by environment rather than in the URL or argv, submodules not followed, symlinks stripped, `.git`
+removed before the tree is pinned.
+
+Act 1 therefore records nothing. It says what is about to happen, and act 3 reads the `git:clone`
+event back out of the run's own stream — the claim passes only if that event is there.
+
+This is also the only path that can end in a **real pull request**: set `PUBLISHER_DRY_RUN=false`
+on the backend and act 12 opens one on GitHub instead of printing the payload. The same flow is
+available in the console under **New Security Run → "Attach a repository you can push to"**.
+
+Requires `GITHUB_TOKEN` to be a fine-grained token with `Contents: read/write` and
+`Pull requests: read/write` on that repository. Without one, the attach fails with GitHub's own
+reason, which act 2 prints verbatim.
 
 ---
 
@@ -87,6 +144,9 @@ The target is [`../vulnerable-demo`](../vulnerable-demo), the seeded `reportsvc`
 deliberately planted weaknesses, each marked in-source with its CWE, plus twelve benign requests.
 The comments are there on purpose — the point is that KavachX has to **prove** each one by
 execution rather than by reading the comment, and one of them it cannot prove.
+
+With `--github`, this act instead explains that the **backend** will clone, and records nothing;
+the clone is verified in act 3 from the run's own `git:clone` event.
 
 ### Act 2 — authorise
 
@@ -193,9 +253,10 @@ origin**. The branch, the commit and the diff are real git objects; `git show --
 > gate you only pass once is a gate you can race. Here it ran in dry-run, and this is its payload
 > on a real branch — every byte of it."*
 
-To open a real pull request instead, configure a fine-grained token with push access, attach the
-repository through the GitHub path, and set `PUBLISHER_DRY_RUN=false`. Act 0 reports which mode is
-active, so the demo never claims a live PR it did not open.
+To open a real pull request instead, run with `--github your-org/your-service` against a repository
+your `GITHUB_TOKEN` can push to, and set `PUBLISHER_DRY_RUN=false` on the backend. Act 12 then
+prints the pull request URL rather than the payload. Act 0 reports which mode is active, so the
+demo never claims a live PR it did not open.
 
 ### Act 13 — proof of work
 
@@ -218,6 +279,7 @@ limitations.
 | `--skip-clone` | off | analyse an already-attached repository instead of cloning |
 | `--keep-clone` | off | reuse an existing clone rather than recreating it |
 | `--repository NAME` | `examples/<clone-name>` | repository `full_name` to analyse |
+| `--github OWNER/REPO` | — | analyse a real GitHub repo the token can push to; the backend clones it, and a real PR is possible |
 | `--no-publish` | off | stop before sending the publish approval |
 | `--api` / `--frontend` | localhost | point at a remote backend and console |
 | `--email` / `--password` | demo operator | sign in as a different role to show RBAC |
@@ -267,7 +329,8 @@ Re-running recreates the clone and the origin from scratch, so the demo is repea
 
 - **It does not open a GitHub pull request by default.** `PUBLISHER_DRY_RUN` is on unless you turn
   it off with a credential behind it. Act 0 states which mode is active and act 12 labels its
-  output accordingly.
+  output accordingly. A real pull request additionally needs `--github` against a repository the
+  token can push to — a public repository is analysis-only by design.
 - **It does not isolate untrusted code under `dev_local`.** That profile is a host subprocess and
   is correct only for this trusted seeded target. Use `--execution gvisor` with the sandbox images
   built for a real isolation boundary.

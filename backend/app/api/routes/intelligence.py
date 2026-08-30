@@ -464,7 +464,7 @@ async def system_gitnexus(
         "resolution_order": [
             "GITNEXUS_BIN environment variable",
             "PATH",
-            "<repo>/node_modules/.bin (make gitnexus)",
+            "<repo>/gitnexus/node_modules/.bin (make gitnexus)",
             "npx (opt-in via GITNEXUS_ALLOW_NPX)",
         ],
         "info": info.as_dict() if info else {"available": False, "reason": "disabled by config"},

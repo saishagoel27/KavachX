@@ -433,7 +433,8 @@ async def github_info() -> dict[str, object]:
             "KavachX authenticates with a fine-grained personal access token (GITHUB_TOKEN) that "
             "needs Contents: read/write and Pull requests: read/write on the target repository. "
             "The token is never written to the database, and push authority is confirmed against "
-            "the API before any write."
+            "the API before the repository is attached. The same token clones the source at "
+            "ingest and opens the pull request at publish; neither is reachable from the sandbox."
         ),
     }
 

@@ -212,6 +212,15 @@ cd frontend; npm run dev
 Then open <http://localhost:3000>, click **Launch Console**, and log in with the seeded
 credentials (default `demo@kavachx.io` / `kavachx-demo-2024`).
 
+To analyse a repository that actually exists on GitHub, go to **New Security Run** and choose:
+
+* **Attach a repository you can push to** — push access is confirmed against the GitHub API before
+  the repository is attached, the source is **cloned** at ingest, and a gauntlet-verified repair can
+  be approved into a real `kavachx/` branch and pull request. Needs `GITHUB_TOKEN`.
+* **Add a public repo** — source is fetched at a resolved commit SHA and analysed in full, but
+  publishing is refused by design: KavachX holds no credential for a repository it does not control.
+  See [docs/PR_BOT.md](docs/PR_BOT.md) for what would have to be decided to change that.
+
 ### Full Docker path (Linux / macOS / Windows with Docker Desktop)
 
 ```bash
@@ -296,7 +305,7 @@ hardcoded secret and CWE-295 `jwt.decode(verify=False)`.
 
 ```
 kavachx/
-├── package.json              GitNexus, repo-local (optional; PolyForm Noncommercial)
+├── gitnexus/                 GitNexus, repo-local (optional; PolyForm Noncommercial)
 ├── frontend/                 Next.js 16 · TypeScript · Tailwind · Monaco · Recharts
 ├── backend/                  FastAPI · SQLAlchemy 2 · Alembic · LangGraph
 │   └── app/

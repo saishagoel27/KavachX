@@ -101,4 +101,4 @@ and egress. The run also appears in **Console → Runs**.
 |------|---------------------|
 | [`../fuzz-target-demo`](../fuzz-target-demo) | *does the fuzzer build a campaign and find crashes?* (fuzzer in isolation) |
 | this one | *does the whole loop work end-to-end and show in the UI?* (infra → fuzz → validate → patch → cert) |
-| [`../platform-walkthrough`](../platform-walkthrough) | *the whole product, narrated, for an audience* — adds the real `git clone`, the publish approval, the pull request branch, and a computed pass/fail verdict |
+| [`../platform-walkthrough`](../platform-walkthrough) | *the whole product, narrated, for an audience* — adds the real `git clone`, the publish approval, the pull request branch, and a computed pass/fail verdict. `verify_walkthrough.py` checks it without a server. |

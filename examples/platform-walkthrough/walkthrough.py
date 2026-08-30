@@ -79,7 +79,10 @@ class Walkthrough:
         self.workdir = (HERE / "out").resolve()
         self.run_out: Path = self.workdir
 
-        self.repo_full_name = args.repository or f"examples/{args.clone_name}"
+        #: --github names a repository the backend will clone itself; otherwise the walkthrough
+        #: clones locally into examples/ and analyses that working copy.
+        self.github_mode = bool(args.github)
+        self.repo_full_name = args.github or args.repository or f"examples/{args.clone_name}"
         self.repository: dict[str, Any] = {}
         self.run: dict[str, Any] = {}
         self.detail: dict[str, Any] = {}
@@ -252,6 +255,23 @@ class Walkthrough:
     def act_clone(self) -> None:
         ui.act("1", "clone", "Where does the code come from, and what exactly was fetched?")
 
+        if self.github_mode:
+            ui.section("The clone happens server-side")
+            ui.kv("repository", self.repo_full_name, colour=C.BOLD)
+            ui.kv("cloned by", "the KavachX backend, at ingest")
+            ui.blank()
+            ui.note(
+                "With --github the walkthrough does not clone anything itself. The repository is "
+                "attached in act 2 only after GitHub confirms the configured token has push "
+                "access, and the backend then clones it at ingest — outside the sandbox, "
+                "submodules not followed, symlinks stripped, pinned to a real commit."
+            )
+            ui.note(
+                "Nothing is recorded as proved here. Act 3 reads the clone back out of the run's "
+                "own event stream, and this claim passes only if that event is there."
+            )
+            return
+
         if self.args.skip_clone:
             ui.note(
                 f"--skip-clone was passed, so the walkthrough analyses the already-attached "
@@ -321,16 +341,20 @@ class Walkthrough:
                 "repository's examples/ tree. That is the entire allowlist for local analysis — "
                 "an arbitrary directory on disk is refused even in development."
             )
+            body: dict[str, Any] = {
+                "full_name": self.repo_full_name,
+                "authorisation_confirmed": True,
+            }
+            if self.github_mode:
+                # No local_seeded and no public flag: the backend takes the fine-grained-token
+                # branch, which confirms push access against the GitHub API before attaching.
+                # Blank branch means "whatever GitHub reports as the default".
+                body["default_branch"] = self.args.branch if self.args.branch != "main" else ""
+            else:
+                body["local_seeded"] = True
+                body["default_branch"] = self.args.branch
             try:
-                existing = self.api.post(
-                    f"/api/projects/{project_id}/repositories",
-                    {
-                        "full_name": self.repo_full_name,
-                        "local_seeded": True,
-                        "default_branch": self.args.branch,
-                        "authorisation_confirmed": True,
-                    },
-                )
+                existing = self.api.post(f"/api/projects/{project_id}/repositories", body)
             except ApiError as exc:
                 raise WalkthroughFailed(
                     f"Could not attach {self.repo_full_name!r}: HTTP {exc.status}\n{exc.body}"
@@ -452,6 +476,31 @@ class Walkthrough:
             raise WalkthroughFailed(
                 f"The run ended as {status}: {self.detail.get('error_message', '')}"
             )
+
+        if self.github_mode:
+            # Act 1 promised the backend would clone the repository. This is where that is
+            # checked — against the run's own tool events, not against the promise.
+            clone_events = [e for e in self.events_of("tool") if e.get("name") == "git:clone"]
+            ui.section("The clone, read back from the run")
+            if clone_events:
+                clone = clone_events[0]
+                ui.kv("tool", clone.get("name"))
+                ui.kv("target", clone.get("target"), colour=C.BOLD)
+                ui.kv("detail", clone.get("detail"))
+                ui.kv("took", f"{clone.get('ms')} ms")
+                ui.kv("commit", self.detail.get("commit_sha"), colour=C.BOLD)
+            else:
+                ui.fail("no git:clone event was recorded for this run")
+            self.record(
+                "clone",
+                bool(clone_events),
+                (
+                    f"backend cloned {self.repo_full_name} at "
+                    f"{str(self.detail.get('commit_sha', ''))[:12]}"
+                    if clone_events
+                    else "no git:clone event in the run's event stream"
+                ),
+            )
         self.record(
             "run",
             True,
@@ -492,6 +541,15 @@ class Walkthrough:
             if mode == "full":
                 for item in event.get("evidence", [])[:6]:
                     ui.raw(f"            {C.GREY}· {str(item)[:96]}{C.RESET}")
+            return
+
+        if kind == "tool":
+            mark = f"{C.GREEN}ok{C.RESET}" if event.get("ok") else f"{C.RED}FAIL{C.RESET}"
+            ui.raw(
+                f"        {C.BLUE}tool{C.RESET} {event.get('name', '')} "
+                f"{C.GREY}{str(event.get('target', ''))[:44]}{C.RESET} [{mark}] "
+                f"{C.GREY}{str(event.get('detail', ''))[:56]}{C.RESET}"
+            )
             return
 
         if kind == "finding":
@@ -1231,11 +1289,15 @@ class Walkthrough:
         for name, value in (payload.get("guarantees") or {}).items():
             ui.kv(name.replace("_", " "), value, width=38)
 
-        if self.args.skip_clone or not gitwork.is_repo(self.clone_path):
+        if self.github_mode or self.args.skip_clone or not gitwork.is_repo(self.clone_path):
             ui.blank()
             ui.note(
-                "There is no local clone to apply this payload to, so it stops here as a payload. "
-                "Run without --skip-clone to see it committed and pushed."
+                "The publisher is in dry-run, so this is where it stops: a payload, not a pull "
+                "request. Set PUBLISHER_DRY_RUN=false on the backend to open a real one against "
+                f"{self.repo_full_name}."
+                if self.github_mode
+                else "There is no local clone to apply this payload to, so it stops here as a "
+                "payload. Run without --skip-clone to see it committed and pushed."
             )
             self.record(
                 "pull_request",
@@ -1436,6 +1498,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--repository",
         default="",
         help="repository full_name to analyse (default examples/<clone-name>)",
+    )
+    target.add_argument(
+        "--github",
+        default="",
+        metavar="OWNER/REPO",
+        help=(
+            "analyse a GitHub repository the configured token can push to. KavachX clones it "
+            "server-side at ingest, and a verified repair can become a real pull request"
+        ),
     )
 
     run = parser.add_argument_group("run")

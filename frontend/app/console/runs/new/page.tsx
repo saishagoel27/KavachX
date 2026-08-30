@@ -1,9 +1,10 @@
 "use client";
 
-import { Github, Play, ShieldAlert } from "lucide-react";
+import { Github, KeyRound, Play, ShieldAlert } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
+import { OwnedRepoAttach } from "@/components/owned-repo";
 import { PublicRepoAttach } from "@/components/public-repo";
 import {
   ApiError,
@@ -156,6 +157,7 @@ export default function NewRunPage() {
   const [repositories, setRepositories] = useState<Repository[] | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [showPublic, setShowPublic] = useState(false);
+  const [showOwned, setShowOwned] = useState(false);
   const [repositoryId, setRepositoryId] = useState("");
   const [branch, setBranch] = useState("main");
   const [commitSha, setCommitSha] = useState("");
@@ -238,11 +240,12 @@ export default function NewRunPage() {
     if (fw.kind === "http" || fw.kind === "cli") setTargetType(fw.kind);
   };
 
-  const onPublicAttached = (repository: Repository) => {
+  const onRepositoryAttached = (repository: Repository) => {
     setRepositories((current) => dedupeById([repository, ...(current ?? [])]));
     setRepositoryId(repository.id);
     setBranch(repository.default_branch);
     setShowPublic(false);
+    setShowOwned(false);
     setError(null);
   };
 
@@ -297,23 +300,36 @@ export default function NewRunPage() {
         </p>
       </header>
 
+      {showOwned && (
+        <OwnedRepoAttach
+          projects={projects}
+          defaultProjectId={projects[0]?.id}
+          onAttached={onRepositoryAttached}
+        />
+      )}
+
       {showPublic && (
         <PublicRepoAttach
           projects={projects}
           defaultProjectId={projects[0]?.id}
-          onAttached={onPublicAttached}
+          onAttached={onRepositoryAttached}
         />
       )}
 
       {repositories.length === 0 && !showPublic ? (
         <Panel title="No authorised repository">
           <p className="text-small text-foreground-muted">
-            KavachX cannot start a run without a repository it has verified authority over. Attach a
-            public GitHub repository below, configure a fine-grained token with push access for a
-            private one, or use the seeded local target in development mode.
+            KavachX cannot start a run without a repository it has verified authority over. Attach
+            one your fine-grained token can push to — the only path that can end in a pull request —
+            or a public repository for analysis only. In development mode the seeded local target is
+            also available.
           </p>
           <div className="mt-4 flex flex-wrap gap-2">
-            <button onClick={() => setShowPublic(true)} className="btn-primary text-xs">
+            <button onClick={() => setShowOwned(true)} className="btn-primary text-xs">
+              <KeyRound className="h-3.5 w-3.5" />
+              Attach a repository you can push to
+            </button>
+            <button onClick={() => setShowPublic(true)} className="btn-secondary text-xs">
               <Github className="h-3.5 w-3.5" />
               Analyse a public repository
             </button>
@@ -327,14 +343,24 @@ export default function NewRunPage() {
           <Panel
             title="Target"
             actions={
-              <button
-                type="button"
-                onClick={() => setShowPublic((v) => !v)}
-                className="flex items-center gap-1.5 font-mono text-mono-label uppercase text-accent hover:underline"
-              >
-                <Github className="h-3.5 w-3.5" />
-                {showPublic ? "hide" : "add a public repo"}
-              </button>
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => setShowOwned((v) => !v)}
+                  className="flex items-center gap-1.5 font-mono text-mono-label uppercase text-accent hover:underline"
+                >
+                  <KeyRound className="h-3.5 w-3.5" />
+                  {showOwned ? "hide" : "add your repo"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowPublic((v) => !v)}
+                  className="flex items-center gap-1.5 font-mono text-mono-label uppercase text-accent hover:underline"
+                >
+                  <Github className="h-3.5 w-3.5" />
+                  {showPublic ? "hide" : "add a public repo"}
+                </button>
+              </div>
             }
           >
             <div className="space-y-4">
