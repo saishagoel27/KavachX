@@ -261,6 +261,20 @@ class SandboxAdapter(abc.ABC):
 
 #: Environment variables the sandbox is allowed to see. Everything else is dropped, which is
 #: how "the sandbox has zero secrets" is actually implemented rather than merely asserted.
+#: Directory the harness is injected into, inside the workspace. Duplicated by each adapter as a
+#: local constant; defined here so the deps directory below can be expressed against it.
+HARNESS_DIR = "_kavachx"
+
+#: Where provisioning installs interpreter-level dependencies, relative to the workspace root.
+#:
+#: It has to be *inside* the workspace, because the workspace bind mount is the only thing that
+#: survives an exec: every execution is a fresh container, so anything written to the image's own
+#: site-packages is discarded before the next one starts. And it has to be inside ``_kavachx``,
+#: because that directory is already both preserved by :func:`app.sandbox.workspace.reset_work`
+#: (so a gauntlet reset does not delete the dependencies mid-run) and ignored by the indexer and
+#: the content hash (so installed packages never enter the pinned source tree or the code graph).
+DEPS_DIR = f"{HARNESS_DIR}/deps"
+
 ENV_ALLOWLIST: tuple[str, ...] = (
     "PATH",
     "SYSTEMROOT",

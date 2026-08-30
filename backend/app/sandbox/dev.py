@@ -33,6 +33,7 @@ from pathlib import Path
 
 from app.core.logging import get_logger
 from app.sandbox.base import (
+    DEPS_DIR,
     ExecRequest,
     ExecResult,
     SandboxAdapter,
@@ -63,6 +64,7 @@ class DevSandboxAdapter(SandboxAdapter):
     async def start(self) -> None:
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.harness_dir.mkdir(parents=True, exist_ok=True)
+        (self.workspace / DEPS_DIR).mkdir(parents=True, exist_ok=True)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self._install_harness()
         self._started = True
@@ -89,19 +91,34 @@ class DevSandboxAdapter(SandboxAdapter):
         cwd.mkdir(parents=True, exist_ok=True)
 
         guard_report = self.output_dir / f"{GUARD_REPORT_NAME}.{self.execution_count}"
+        deps_dir = self.workspace / DEPS_DIR
         pythonpath = os.pathsep.join(
-            [str(self.harness_dir), *[str(self.workspace / p) for p in ("src", ".")]]
+            [
+                str(self.harness_dir),
+                *[str(self.workspace / p) for p in ("src", ".")],
+                # Last, so a module in the target's own tree wins over an installed package.
+                str(deps_dir),
+            ]
         )
-        env = build_sandbox_env(
-            {
-                "PYTHONPATH": pythonpath,
-                "KAVACHX_GUARD_REPORT": str(guard_report),
-                "KAVACHX_WORKSPACE_ROOT": str(self.workspace.resolve()),
-                "KAVACHX_SANDBOX": "1",
-                "KAVACHX_SESSION": self.session_id,
-                **request.env,
-            }
-        )
+        overrides = {
+            "PYTHONPATH": pythonpath,
+            "KAVACHX_GUARD_REPORT": str(guard_report),
+            "KAVACHX_WORKSPACE_ROOT": str(self.workspace.resolve()),
+            "KAVACHX_SANDBOX": "1",
+            "KAVACHX_SESSION": self.session_id,
+            "KAVACHX_DEPS_DIR": str(deps_dir),
+            # `pip install --target` puts console scripts in <target>/bin, so a tool installed by
+            # provisioning is only runnable if that directory is on PATH.
+            "PATH": os.pathsep.join([str(deps_dir / "bin"), os.environ.get("PATH", "")]).rstrip(
+                os.pathsep
+            ),
+        }
+        if request.allow_network:
+            # The host adapter is already networked, but kx_guard is installed here too — via
+            # sitecustomize on the harness PYTHONPATH — so without this a provisioning
+            # `pip install` is denied its sockets exactly as it is under gVisor.
+            overrides["KAVACHX_ALLOW_NETWORK"] = "1"
+        env = build_sandbox_env({**overrides, **request.env})
 
         timeout = request.timeout_seconds or self.limits.wall_clock_seconds
         started = time.perf_counter()

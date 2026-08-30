@@ -45,6 +45,7 @@ from pathlib import Path
 from app.core.errors import SandboxUnavailable
 from app.core.logging import get_logger
 from app.sandbox.base import (
+    DEPS_DIR,
     ExecRequest,
     ExecResult,
     SandboxAdapter,
@@ -163,6 +164,10 @@ class GvisorSandboxAdapter(SandboxAdapter):
         # runsc fails container creation with exit 125. Create it on the host first, like the
         # harness output dir, so the mountpoint always exists under the read-only bind.
         (self.workspace / ".tmp").mkdir(parents=True, exist_ok=True)
+        # Provisioning installs interpreter dependencies here. It lives under the bind mount, so
+        # it is the only place packages survive a container exit; created on the host because the
+        # execute phase binds the workspace read-only and could not create it.
+        (self.workspace / DEPS_DIR).mkdir(parents=True, exist_ok=True)
         for item in (Path(__file__).parent / "harness").glob("*.py"):
             shutil.copy2(item, self.harness_dir / item.name)
 
@@ -177,11 +182,15 @@ class GvisorSandboxAdapter(SandboxAdapter):
         container_name: str | None = None,
     ) -> list[str]:
         assert self._docker
+        deps_dir = f"{CONTAINER_WORKSPACE}/{DEPS_DIR}"
         pythonpath = ":".join(
             [
                 f"{CONTAINER_WORKSPACE}/{HARNESS_DIR_NAME}",
                 f"{CONTAINER_WORKSPACE}/src",
                 CONTAINER_WORKSPACE,
+                # Last, so a module in the target's own tree always wins over an installed
+                # package of the same name.
+                deps_dir,
             ]
         )
         env = build_sandbox_env(
@@ -191,13 +200,16 @@ class GvisorSandboxAdapter(SandboxAdapter):
                 "KAVACHX_WORKSPACE_ROOT": CONTAINER_WORKSPACE,
                 "KAVACHX_SANDBOX": "1",
                 "KAVACHX_SESSION": self.session_id,
+                "KAVACHX_DEPS_DIR": deps_dir,
                 "HOME": CONTAINER_TMP,
                 "TMPDIR": CONTAINER_TMP,
                 **request.env,
             }
         )
-        # PATH inside the image, not the host's.
-        env["PATH"] = "/usr/local/bin:/usr/bin:/bin"
+        # PATH inside the image, not the host's. The deps bin directory comes first because
+        # `pip install --target` puts console scripts there: without it an operator can install a
+        # command-line tool successfully and still have the start command fail to find it.
+        env["PATH"] = f"{deps_dir}/bin:/usr/local/bin:/usr/bin:/bin"
 
         # Two postures share this adapter. The trusted *build* phase (operator-authored install /
         # build) needs the registry and a writable tree; the untrusted *execute* phase gets neither.
@@ -209,6 +221,14 @@ class GvisorSandboxAdapter(SandboxAdapter):
             # no-new-privileges, resource caps, runsc — is unchanged.
             network_args = ["--network", "bridge"]
             user_args = ["--user", _host_user()]
+            if request.allow_network:
+                # Without this the two layers disagree: Docker attaches an interface, but
+                # kx_guard — auto-installed by sitecustomize because the harness is first on
+                # PYTHONPATH in *every* exec — still monkey-patches socket/getaddrinfo to raise.
+                # pip is a Python process, so `pip install` failed with "Network access is denied
+                # for analysed code" and no route to a package index. The execute phase leaves
+                # allow_network False, so the guard stays armed there.
+                env["KAVACHX_ALLOW_NETWORK"] = "1"
             read_only_root: list[str] = []
             source_mount = (
                 f"type=bind,source={self.workspace.resolve()},target={CONTAINER_WORKSPACE}"
