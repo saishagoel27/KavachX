@@ -23,6 +23,26 @@ Without `make`, the same driver is:
 cd backend && uv run pytest -s -v tests/test_e2e.py::test_full_pipeline
 ```
 
+### The narrated walkthrough (the one to run in front of an audience)
+
+```bash
+make dev                                              # API on :8000, console on :3000
+python examples/platform-walkthrough/walkthrough.py --pause
+```
+
+[`examples/platform-walkthrough`](../examples/platform-walkthrough) is the full product in
+fourteen narrated acts over the **live** API, so everything it does is persisted and visible in
+the console at the same time. It differs from `make demo` in three ways that matter for a demo:
+
+* it **clones** the target with real git, so ingest operates on a working copy with history;
+* it sends the **publish approval** and shows the Publisher's payload committed onto a real branch
+  and pushed to that clone's origin — the step `make demo` stops short of;
+* it ends with a **computed** verdict: every claim it made, with the evidence behind it, and a
+  non-zero exit if any stage did not produce what it claims.
+
+`--pause` waits for Enter between acts. That folder's README is the presenter's script: what each
+act shows, and what to say while it is on screen.
+
 ### Or drive it from the browser
 
 Bring the stack up (`make dev`, or the two `uv run uvicorn` / `npm run dev` processes) then open

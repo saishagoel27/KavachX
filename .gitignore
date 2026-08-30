@@ -49,6 +49,12 @@ examples/vulnerable-c-demo/leak-*
 examples/vulnerable-c-demo/timeout-*
 *.dSYM/
 
+# --- platform walkthrough (created at demo time, never committed) ----------
+# examples/platform-walkthrough clones its analysis target into examples/ and writes the run's
+# artifacts — certificate, diff, publisher payload, event log — under its own out/ directory.
+examples/walkthrough-clone/
+examples/platform-walkthrough/out/
+
 # --- editors / os ----------------------------------------------------------
 .vscode/
 .idea/

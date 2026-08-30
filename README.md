@@ -178,6 +178,21 @@ deterministic proposer. It needs no PostgreSQL, no Docker and no API keys, and p
 KAVACH SECURITY PROOF with real reproduction counts, gauntlet stage tallies and certificate
 hashes.
 
+### The full walkthrough: clone → fuzz → repair → pull request → certificate
+
+```bash
+make dev                                              # API on :8000, console on :3000
+python examples/platform-walkthrough/walkthrough.py   # or: make walkthrough
+```
+
+[`examples/platform-walkthrough`](examples/platform-walkthrough) drives the product end to end
+over the live API and narrates every stage from real state: it **git clones** a repository,
+attaches it with recorded authority, follows the run phase by phase, then shows the index bounds,
+the surviving contract, the fuzzing campaign, the validated finding, the shield, the refuted patch
+and the one that held, the four gauntlet stages, the signed certificate — and finally the
+Publisher's payload, committed to a real branch and pushed to that clone's origin. Add `--pause`
+for presenter mode. It exits non-zero if any stage did not produce what it claims.
+
 ### The interactive console
 
 ```bash
@@ -210,6 +225,7 @@ docker compose up --build
 make bootstrap    # deps + db + migrate + seed
 make dev          # run backend + frontend
 make demo         # bootstrap, then drive a full run headlessly and print the certificate
+make walkthrough  # narrated end-to-end walkthrough over the live API (needs `make dev`)
 make test         # backend test suite
 ```
 

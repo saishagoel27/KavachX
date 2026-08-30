@@ -12,6 +12,8 @@ BACKEND := backend
 FRONTEND := frontend
 PY := $(BACKEND)/.venv/bin/python
 UV := uv
+#: Host interpreter for the stdlib-only walkthrough driver. Override on Windows: PY3=python.
+PY3 ?= python3
 
 .PHONY: help
 help: ## Show this help
@@ -103,6 +105,11 @@ dev: ## Run backend (:8000) and frontend (:3000) together; Ctrl-C stops both
 .PHONY: demo
 demo: ## Drive the full end-to-end loop against the seeded target and print the certificate
 	cd $(BACKEND) && $(UV) run pytest -s -v tests/test_e2e.py::test_full_pipeline
+
+.PHONY: walkthrough
+walkthrough: ## Narrated walkthrough over the live API: clone -> fuzz -> repair -> PR -> certificate
+	@echo "  needs the API running (make backend / make dev). Pass options with ARGS=..."
+	$(PY3) examples/platform-walkthrough/walkthrough.py $(ARGS)
 
 # ---------------------------------------------------------------------------
 .PHONY: test
