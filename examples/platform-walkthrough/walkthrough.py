@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -63,6 +64,24 @@ DEFAULT_SOURCE = "examples/vulnerable-demo"
 DEFAULT_CLONE_NAME = "walkthrough-clone"
 
 
+def normalise_repo(reference: str) -> str:
+    """Reduce whatever the operator pasted to ``owner/repo``.
+
+    The attach endpoint puts this straight into a GitHub API path, so a full URL becomes
+    ``/repos/https://github.com/owner/repo`` and comes back 404 — which reads like "the token
+    has no access" and sends you hunting for a permissions problem that does not exist.
+    Accepts the same forms the console's public-repo field does.
+    """
+    value = (reference or "").strip().removeprefix("@")
+    value = re.sub(r"^git\+", "", value)
+    value = re.sub(r"^(https?://|git://|ssh://)", "", value)
+    value = re.sub(r"^git@github\.com:", "", value)
+    value = re.sub(r"^(www\.)?github\.com/", "", value)
+    value = value.removesuffix(".git").strip("/")
+    parts = [p for p in value.split("/") if p]
+    return "/".join(parts[:2]) if len(parts) >= 2 else value
+
+
 class WalkthroughFailed(RuntimeError):
     """An act cannot continue. The message is shown to the operator as written."""
 
@@ -82,7 +101,9 @@ class Walkthrough:
         #: --github names a repository the backend will clone itself; otherwise the walkthrough
         #: clones locally into examples/ and analyses that working copy.
         self.github_mode = bool(args.github)
-        self.repo_full_name = args.github or args.repository or f"examples/{args.clone_name}"
+        self.repo_full_name = (
+            normalise_repo(args.github) or args.repository or f"examples/{args.clone_name}"
+        )
         self.repository: dict[str, Any] = {}
         self.run: dict[str, Any] = {}
         self.detail: dict[str, Any] = {}
@@ -201,11 +222,42 @@ class Walkthrough:
                 "push access to open a real pull request instead."
             )
 
+        ui.section("Operator")
+        try:
+            me = self.api.login(self.args.email, self.args.password)
+        except ApiError as exc:
+            raise WalkthroughFailed(
+                f"Login failed for {self.args.email}: HTTP {exc.status}. "
+                "Run `make seed` to create the demo operator, or pass --email/--password."
+            ) from exc
+        user = me.get("user") or {}
+        role = me.get("active_role") or "?"
+        active = str(me.get("active_organisation_id") or "")
+        organisation = next(
+            (
+                m.get("organisation_name")
+                for m in me.get("memberships", [])
+                if str(m.get("organisation_id")) == active
+            ),
+            "-",
+        )
+        ui.kv("signed in as", f"{user.get('email', self.args.email)} ({role})")
+        ui.kv("organisation", organisation)
+        ui.kv("permissions", f"{len(me.get('permissions', []))} granted")
+        if "patch:publish" not in me.get("permissions", []):
+            ui.warn(
+                "This account does not hold patch:publish, so act 12 will not be able to "
+                "approve a publish."
+            )
+
+        # Queried after sign-in: /api/system/engines requires run:read, so asking before
+        # authenticating returned a 401 that looked like "this host has no engines".
         ui.section("Test and fuzzing engines on this host")
         try:
             engines = self.api.get("/api/system/engines")
-        except ApiError:
+        except ApiError as exc:
             engines = {}
+            ui.warn(f"could not read the engine inventory: HTTP {exc.status}")
         inventory = engines.get("engines") or []
         counts = engines.get("counts") or {}
         if inventory:
@@ -231,17 +283,6 @@ class Walkthrough:
             ui.note(str(engines.get("caveat", "")))
         else:
             ui.note("The engine inventory endpoint returned nothing to report.")
-
-        ui.section("Operator")
-        try:
-            me = self.api.login(self.args.email, self.args.password)
-        except ApiError as exc:
-            raise WalkthroughFailed(
-                f"Login failed for {self.args.email}: HTTP {exc.status}. "
-                "Run `make seed` to create the demo operator, or pass --email/--password."
-            ) from exc
-        ui.kv("signed in as", f"{me.get('email', self.args.email)} ({me.get('role', '?')})")
-        ui.kv("organisation", me.get("organisation_name") or me.get("organisation") or "-")
 
         self.record(
             "preflight",
