@@ -20,6 +20,7 @@ htmlcov/
 *.db
 *.db-journal
 .pytest-kavachx.db
+videos
 
 # --- node ------------------------------------------------------------------
 node_modules/
