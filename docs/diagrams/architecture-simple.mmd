@@ -1,0 +1,47 @@
+%%{init: {"theme":"base","themeVariables":{"clusterBkg":"#141618","clusterBorder":"#3a494b","titleColor":"#00dbe7","nodeTextColor":"#e3e2e2","textColor":"#e3e2e2","lineColor":"#8fa1a3","edgeLabelBackground":"#dfe4e5","tertiaryTextColor":"#1b1c1c","labelTextColor":"#1b1c1c","fontSize":"18px"},"flowchart":{"nodeSpacing":34,"rankSpacing":52,"padding":10}}}%%
+flowchart LR
+  classDef det fill:#0d2b2f,stroke:#00c8d4,stroke-width:2px,color:#e6f6f7
+  classDef llm fill:#241a38,stroke:#a78bfa,stroke-width:2.5px,color:#ece7fb
+  classDef gate fill:#3a2c08,stroke:#f5b642,stroke-width:2.5px,color:#fdf3dd
+  classDef sbx fill:#37150f,stroke:#ff6b5e,stroke-width:2.5px,color:#ffe8e5
+  classDef out fill:#0f2a19,stroke:#3ddc84,stroke-width:2px,color:#e4f8ec
+  classDef stop fill:#1b1c1c,stroke:#6b7280,stroke-width:1.5px,color:#b9cacb
+
+  subgraph A["1 · UNDERSTAND, THEN PROPOSE"]
+    direction TB
+    REPO["<b>Repository</b><br/>pinned to a content hash"]:::det
+    GRAPH["<b>Code graph + security model</b><br/>sources · sinks · data flows"]:::det
+    LLM["<b>Local model</b><br/><i>the only place a model is used</i><br/>proposes tests and patches"]:::llm
+    GATE{{"<b>Schema gate</b><br/>no field may assert a verdict"}}:::gate
+    REPO --> GRAPH --> LLM --> GATE
+  end
+
+  subgraph B["2 · PROVE BY EXECUTION"]
+    direction TB
+    SBX["<b>SANDBOX</b><br/>runs the exploit<br/>no network · non-root"]:::sbx
+    ORACLE{{"<b>Deterministic oracle</b><br/>reproduced twice, independently?"}}:::gate
+    HYP["<b>Stays a hypothesis</b><br/>never counted as a finding"]:::stop
+    SBX --> ORACLE
+    ORACLE -- "no" --> HYP
+  end
+
+  subgraph C["3 · REPAIR, THEN ATTACK THE REPAIR"]
+    direction TB
+    FIX["<b>Shield → root cause → patch</b><br/>applied to a copy"]:::det
+    GAUNT{{"<b>Refutation Gauntlet</b><br/>four stages attack the patch"}}:::gate
+    GIVEUP["<b>Honest failure</b><br/>after 3 tries the shield is<br/>the only cover"]:::stop
+    FIX --> GAUNT
+    GAUNT -- "refuted → the bypass<br/>becomes a constraint" --> FIX
+    GAUNT -- "3 tries" --> GIVEUP
+  end
+
+  subgraph D["4 · PROOF-CARRYING OUTPUT"]
+    direction TB
+    CERT["<b>PRAMAAN certificate</b><br/>signed · states what<br/>it cannot prove"]:::out
+    PUB["<b>Publisher</b><br/>the only credential holder<br/>human approval · new branch only"]:::out
+    CERT --> PUB
+  end
+
+  A -- "a valid spec — or, if rejected,<br/>the deterministic fallback" --> B
+  B -- "reproduced ⇒ only now is it a finding" --> C
+  C -- "survives all four stages" --> D
